@@ -1,0 +1,27 @@
+[capital]
+reserve_pct = 0.0
+
+[entry]
+otm_target_pct = 10
+dte_min = 14
+dte_max = 35
+min_bid = 0.10
+min_open_interest = 100
+max_spread_pct = 10
+min_annualized_yield_pct = 15
+
+[universe]
+min_underlying_price = 5.00
+max_price_staleness_min = 30
+
+[risk]
+max_positions = 1
+drawdown_halt_pct = 15
+
+[calls]
+otm_above_basis_pct = 10
+
+[runtime]
+rate_limit_per_min = 150
+snapshot_batch_size = 100
+feed = "iex"
