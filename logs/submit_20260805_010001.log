@@ -1,0 +1,133 @@
+
+===== STEP 1 - ACCOUNT =====
+account number      : PA3X1NFQN84H
+equity               : 1300
+cash                 : 1300
+options buying power : 1300
+options approved lvl : 3
+options trading lvl  : 3
+open position count  : 0
+open order count     : 0
+
+===== STEP 2 - UNDERLYING PRICE =====
+underlying           : F
+price                : 14.135
+quote timestamp      : 2026-08-04 14:59:36.695197+00:00
+now (UTC)            : 2026-08-04 15:00:06.824489+00:00
+age (minutes)        : 0.50
+
+===== STEP 3 - CONTRACT METADATA =====
+filter: underlying=F type=PUT status=ACTIVE expiration=[2026-08-19, 2026-09-09] strike<=13.0
+page 1: returned 38 contracts, next_page_token=None
+pagination complete  : 1 page(s) fetched, final next_page_token=None confirms no truncation
+total contracts      : 38
+OCC symbol                  strike    expiration   DTE    OI (raw)      OI (parsed)
+F260821P00001000              1.00    2026-08-21    16          13               13
+F260821P00002000              2.00    2026-08-21    16        None  OI: UNAVAILABLE
+F260821P00003000              3.00    2026-08-21    16        None  OI: UNAVAILABLE
+F260821P00004000              4.00    2026-08-21    16           5                5
+F260821P00005000              5.00    2026-08-21    16        None  OI: UNAVAILABLE
+F260821P00006000              6.00    2026-08-21    16           3                3
+F260821P00007000              7.00    2026-08-21    16          23               23
+F260821P00008000              8.00    2026-08-21    16           1                1
+F260821P00008500              8.50    2026-08-21    16        None  OI: UNAVAILABLE
+F260821P00009000              9.00    2026-08-21    16          14               14
+F260821P00009500              9.50    2026-08-21    16         101              101
+F260821P00010000             10.00    2026-08-21    16         190              190
+F260821P00010500             10.50    2026-08-21    16        None  OI: UNAVAILABLE
+F260821P00011000             11.00    2026-08-21    16        3723             3723
+F260821P00011500             11.50    2026-08-21    16          34               34
+F260821P00012000             12.00    2026-08-21    16        6735             6735
+F260821P00012500             12.50    2026-08-21    16         824              824
+F260821P00013000             13.00    2026-08-21    16       27180            27180
+F260828P00008500              8.50    2026-08-28    23        None  OI: UNAVAILABLE
+F260828P00009000              9.00    2026-08-28    23          13               13
+F260828P00009500              9.50    2026-08-28    23         170              170
+F260828P00010000             10.00    2026-08-28    23        None  OI: UNAVAILABLE
+F260828P00010500             10.50    2026-08-28    23           2                2
+F260828P00011000             11.00    2026-08-28    23         222              222
+F260828P00011500             11.50    2026-08-28    23          17               17
+F260828P00012000             12.00    2026-08-28    23          56               56
+F260828P00012500             12.50    2026-08-28    23         171              171
+F260828P00013000             13.00    2026-08-28    23         587              587
+F260904P00008500              8.50    2026-09-04    30        None  OI: UNAVAILABLE
+F260904P00009000              9.00    2026-09-04    30        None  OI: UNAVAILABLE
+F260904P00009500              9.50    2026-09-04    30        None  OI: UNAVAILABLE
+F260904P00010000             10.00    2026-09-04    30        None  OI: UNAVAILABLE
+F260904P00010500             10.50    2026-09-04    30           1                1
+F260904P00011000             11.00    2026-09-04    30          22               22
+F260904P00011500             11.50    2026-09-04    30          13               13
+F260904P00012000             12.00    2026-09-04    30           7                7
+F260904P00012500             12.50    2026-09-04    30          45               45
+F260904P00013000             13.00    2026-09-04    30         178              178
+
+===== STEP 4 - QUOTE SNAPSHOT =====
+snapshot response contains 38 symbols
+OCC symbol                     bid       ask       mid    bid_sz    ask_sz  quote ts                        
+F260821P00001000               0.0      0.01    REJECT       0.0      38.0  2026-08-04 14:51:42.610678+00:00  (bid absent)
+F260821P00002000               0.0      0.01    REJECT       0.0       2.0  2026-08-04 14:59:56.635788+00:00  (bid absent)
+F260821P00003000               0.0      0.01    REJECT       0.0      35.0  2026-08-04 14:59:56.635767+00:00  (bid absent)
+F260821P00004000               0.0      0.01    REJECT       0.0      36.0  2026-08-04 14:59:56.635767+00:00  (bid absent)
+F260821P00005000               0.0      0.01    REJECT       0.0      36.0  2026-08-04 14:59:56.635773+00:00  (bid absent)
+F260821P00006000               0.0      0.01    REJECT       0.0     177.0  2026-08-04 14:59:10.352821+00:00  (bid absent)
+F260821P00007000               0.0      0.01    REJECT       0.0    1272.0  2026-08-04 15:00:04.555472+00:00  (bid absent)
+F260821P00008000               0.0      0.01    REJECT       0.0    1177.0  2026-08-04 15:00:02.105164+00:00  (bid absent)
+F260821P00008500               0.0      0.04    REJECT       0.0      93.0  2026-08-04 14:59:56.712780+00:00  (bid absent)
+F260821P00009000               0.0      0.01    REJECT       0.0      40.0  2026-08-04 13:30:02.427671+00:00  (bid absent)
+F260821P00009500               0.0      0.04    REJECT       0.0     892.0  2026-08-04 15:00:04.288030+00:00  (bid absent)
+F260821P00010000               0.0      0.01    REJECT       0.0     262.0  2026-08-04 15:00:07.502509+00:00  (bid absent)
+F260821P00010500               0.0      0.05    REJECT       0.0    1302.0  2026-08-04 15:00:01.813985+00:00  (bid absent)
+F260821P00011000               0.0      0.04    REJECT       0.0    1333.0  2026-08-04 15:00:01.983173+00:00  (bid absent)
+F260821P00011500               0.0      0.05    REJECT       0.0    1087.0  2026-08-04 15:00:04.088705+00:00  (bid absent)
+F260821P00012000              0.01      0.05      0.03       293         4  2026-08-04 14:59:57.166115+00:00
+F260821P00012500              0.02      0.04      0.03       202       273  2026-08-04 14:59:54.113456+00:00
+F260821P00013000              0.07      0.08      0.08        58        62  2026-08-04 14:59:56.635788+00:00
+F260828P00008500               0.0      0.01    REJECT       0.0     125.0  2026-08-04 14:59:59.287838+00:00  (bid absent)
+F260828P00009000               0.0      0.01    REJECT       0.0      90.0  2026-08-04 14:59:56.636314+00:00  (bid absent)
+F260828P00009500               0.0      0.01    REJECT       0.0     107.0  2026-08-04 14:59:56.636314+00:00  (bid absent)
+F260828P00010000               0.0      0.05    REJECT       0.0     136.0  2026-08-04 15:00:03.369638+00:00  (bid absent)
+F260828P00010500               0.0      0.05    REJECT       0.0    1091.0  2026-08-04 15:00:03.293081+00:00  (bid absent)
+F260828P00011000               0.0      0.06    REJECT       0.0    1027.0  2026-08-04 15:00:03.547928+00:00  (bid absent)
+F260828P00011500              0.03      0.06      0.04        86         1  2026-08-04 14:59:57.875805+00:00
+F260828P00012000              0.05      0.06      0.06       132       133  2026-08-04 14:59:56.779821+00:00
+F260828P00012500              0.06      0.13      0.10       354      1512  2026-08-04 14:59:58.110544+00:00
+F260828P00013000              0.11      0.13      0.12       137        98  2026-08-04 14:59:56.635903+00:00
+F260904P00008500               0.0      0.06    REJECT       0.0     102.0  2026-08-04 15:00:02.080302+00:00  (bid absent)
+F260904P00009000               0.0      0.02    REJECT       0.0     338.0  2026-08-04 15:00:01.750583+00:00  (bid absent)
+F260904P00009500               0.0      0.02    REJECT       0.0     288.0  2026-08-04 15:00:01.920607+00:00  (bid absent)
+F260904P00010000               0.0      0.06    REJECT       0.0     209.0  2026-08-04 15:00:01.922677+00:00  (bid absent)
+F260904P00010500               0.0      0.07    REJECT       0.0    1050.0  2026-08-04 15:00:06.718768+00:00  (bid absent)
+F260904P00011000              0.01      0.03      0.02       106         1  2026-08-04 15:00:00.737089+00:00
+F260904P00011500              0.01      0.03      0.02        89         1  2026-08-04 14:59:56.636674+00:00
+F260904P00012000              0.05      0.11      0.08       256       874  2026-08-04 15:00:01.888180+00:00
+F260904P00012500              0.05      0.11      0.08       373       154  2026-08-04 15:00:01.595854+00:00
+F260904P00013000              0.15      0.21      0.18        76         5  2026-08-04 14:59:56.636674+00:00
+STEP 3 contracts with NO snapshot entry at all : 0
+STEP 3 contracts with bid absent (incl. zero)  : 26
+STEP 3 contracts with ask absent (incl. zero)  : 0
+
+===== STEP 5 - SELECT ONE CONTRACT =====
+underlying price     : 14.135
+target strike (10% below): 12.7215
+chosen symbol        : F260821P00012500
+chosen strike        : 12.5
+variance from target : 0.2215
+collateral required  : 1250.00  (strike * 100)
+cash available       : 1300.00
+collateral <= cash   : True
+
+===== STEP 6 - SUBMIT AND CANCEL =====
+intended order       : SELL 1 F260821P00012500 LIMIT 0.2 TIF=DAY
+ask price            : 0.04
+limit price = ask * 5 = 0.2
+unfillable by design : a sell limit 5x above market ask cannot execute, so this proves submit/cancel without risking a fill
+order id             : 7acd83e7-b7ee-41d7-8514-affd2dd25141
+status                : OrderStatus.PENDING_NEW
+symbol                : F260821P00012500
+qty                   : 1
+limit price           : 0.2
+status after 2s       : OrderStatus.NEW
+status after cancel   : OrderStatus.CANCELED
+open orders remaining : 0
+
+--- STDERR ---

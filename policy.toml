@@ -7,12 +7,22 @@ dte_min = 14
 dte_max = 35
 min_bid = 0.10
 min_open_interest = 100
-max_spread_pct = 10
-min_annualized_yield_pct = 15
+max_spread_abs = 0.10          # PROVISIONAL, set from 3 Aug 2026 live session,
+                               # 273 gate survivors: p25 0.14 p50 0.25 p75 0.54.
+                               # Replaced max_spread_pct: percentage spread measures
+                               # tick granularity, not liquidity, at sub-$1 premiums.
+min_annualized_yield_pct = 7   # PROVISIONAL, learning phase. Indexed to risk-free
+                               # rate, not to capital. NOTE: 272/273 survivors in the
+                               # 3 Aug session cleared 15%, so this gate is currently
+                               # non-binding. High yield here signals high IV, i.e.
+                               # risk, not quality.
 
 [universe]
 min_underlying_price = 5.00
-max_price_staleness_min = 30
+max_price_staleness_min = 60
+
+# [risk] and [calls] are consumed by the executor, not screener.py.
+# Their absence from this script is correct, not drift.
 
 [risk]
 max_positions = 1

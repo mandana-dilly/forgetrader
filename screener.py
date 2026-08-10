@@ -277,9 +277,17 @@ def stage_b(stock_client, trading_client, policy, survivors, feed, run_ts_str):
 # ---------------------------------------------------------------------------
 def evaluate_contract(contract, snap, underlying_price, underlying_price_ts,
                        underlying_staleness_min, today, dte_min, dte_max,
-                       otm_target_pct, min_bid, min_oi, max_spread_pct,
-                       min_yield_pct, available):
+                       otm_target_pct, min_bid, min_oi, max_spread_abs,
+                       min_yield_pct, available, max_staleness_min):
     fails = []
+
+    adjusted_pass = contract.root_symbol == contract.underlying_symbol
+    if not adjusted_pass:
+        fails.append("adjusted_contract")
+
+    staleness_pass = underlying_staleness_min is not None and underlying_staleness_min <= max_staleness_min
+    if not staleness_pass:
+        fails.append("stale_underlying_price")
 
     dte = (contract.expiration_date - today).days
     dte_pass = dte_min <= dte <= dte_max
@@ -322,9 +330,6 @@ def evaluate_contract(contract, snap, underlying_price, underlying_price_ts,
         else:
             bid_pass = True
 
-        if ask is None:
-            fails.append("null_ask")
-
         if bid is not None and ask is not None and (bid + ask) != 0:
             mid = (bid + ask) / 2
         else:
@@ -343,14 +348,17 @@ def evaluate_contract(contract, snap, underlying_price, underlying_price_ts,
     if bid is not None and ask is not None and mid not in (None, 0):
         spread_abs = ask - bid
         spread_pct = (spread_abs / mid) * 100
-        spread_pass = spread_pct <= max_spread_pct
-        if not spread_pass:
-            fails.append("spread_too_wide")
     else:
         spread_abs = None
         spread_pct = None
+
+    if spread_abs is None:
         spread_pass = False
         fails.append("undefined_metric_spread")
+    else:
+        spread_pass = spread_abs <= max_spread_abs
+        if not spread_pass:
+            fails.append("spread_too_wide")
 
     collateral = strike * 100
     collateral_pass = collateral <= available
@@ -368,14 +376,19 @@ def evaluate_contract(contract, snap, underlying_price, underlying_price_ts,
         yield_pass = False
         fails.append("undefined_metric_yield")
 
-    all_pass = dte_pass and otm_pass and bid_pass and oi_pass and spread_pass and collateral_pass and yield_pass
+    all_pass = (adjusted_pass and staleness_pass and dte_pass and otm_pass
+                and bid_pass and oi_pass and spread_pass and collateral_pass
+                and yield_pass)
 
     return {
         "underlying_price": underlying_price,
         "underlying_price_ts": underlying_price_ts,
-        "underlying_staleness_min": round(underlying_staleness_min, 2),
+        "underlying_staleness_min": round(underlying_staleness_min, 2) if underlying_staleness_min is not None else "",
         "contract_symbol": contract.symbol,
+        "root_symbol": contract.root_symbol,
         "expiration_date": str(contract.expiration_date),
+        "adjusted_pass": adjusted_pass,
+        "staleness_pass": staleness_pass,
         "dte": dte, "dte_pass": dte_pass,
         "strike": strike,
         "otm_pct": round(otm_pct, 4) if otm_pct is not None else "",
@@ -393,7 +406,7 @@ def evaluate_contract(contract, snap, underlying_price, underlying_price_ts,
         "annualized_yield_pct": round(annualized_yield_pct, 4) if annualized_yield_pct is not None else "",
         "yield_pass": yield_pass,
         "all_pass": all_pass,
-        "rejected_by": ",".join(fails),
+        "rejected_by": ";".join(fails),
     }
 
 
@@ -405,8 +418,9 @@ def stage_c(trading_client, option_client, policy, survivors_b, max_chains, avai
     otm_target_pct = entry["otm_target_pct"]
     min_bid = entry["min_bid"]
     min_oi = entry["min_open_interest"]
-    max_spread_pct = entry["max_spread_pct"]
+    max_spread_abs = entry["max_spread_abs"]
     min_yield_pct = entry["min_annualized_yield_pct"]
+    max_staleness_min = policy["universe"]["max_price_staleness_min"]
 
     # widen the fetch window past dte_max, per the pattern established in smoke.py's
     # chain read path, then filter to [dte_min, dte_max] in Python (dte_pass column)
@@ -477,7 +491,7 @@ def stage_c(trading_client, option_client, policy, survivors_b, max_chains, avai
                 c, snapshots.get(c.symbol), underlying_price,
                 underlying_price_ts.isoformat(), underlying_staleness_min, today,
                 dte_min, dte_max, otm_target_pct, min_bid, min_oi,
-                max_spread_pct, min_yield_pct, available,
+                max_spread_abs, min_yield_pct, available, max_staleness_min,
             )
             row["underlying_symbol"] = symbol
             all_rows.append(row)
@@ -502,12 +516,12 @@ def stage_c(trading_client, option_client, policy, survivors_b, max_chains, avai
     SCANS_DIR.mkdir(exist_ok=True)
     chains_path = SCANS_DIR / f"chains_{run_ts_str}.csv"
     fieldnames = [
-        "underlying_symbol", "underlying_price", "underlying_price_ts", "underlying_staleness_min",
+        "underlying_symbol", "root_symbol", "underlying_price", "underlying_price_ts", "underlying_staleness_min",
         "contract_symbol", "expiration_date", "dte", "dte_pass",
         "strike", "otm_pct", "otm_pass", "bid", "ask", "mid", "bid_pass",
         "open_interest", "oi_pass", "spread_abs", "spread_pct", "spread_pass",
         "collateral", "collateral_pass", "annualized_yield_pct", "yield_pass",
-        "all_pass", "rejected_by",
+        "adjusted_pass", "staleness_pass", "all_pass", "rejected_by",
     ]
     with open(chains_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
