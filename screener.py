@@ -33,6 +33,7 @@ from alpaca.trading.requests import GetAssetsRequest, GetOptionContractsRequest
 SCRIPT_DIR = Path(__file__).resolve().parent
 POLICY_PATH = SCRIPT_DIR / "policy.toml"
 SCANS_DIR = SCRIPT_DIR / "scans"
+FAILS_DELIM = ";"
 
 # ---------------------------------------------------------------------------
 # rate limiter - single shared throttle across every client call in the script
@@ -406,7 +407,7 @@ def evaluate_contract(contract, snap, underlying_price, underlying_price_ts,
         "annualized_yield_pct": round(annualized_yield_pct, 4) if annualized_yield_pct is not None else "",
         "yield_pass": yield_pass,
         "all_pass": all_pass,
-        "rejected_by": ";".join(fails),
+        "rejected_by": FAILS_DELIM.join(fails),
     }
 
 
@@ -497,7 +498,7 @@ def stage_c(trading_client, option_client, policy, survivors_b, max_chains, avai
             all_rows.append(row)
             if row["all_pass"]:
                 all_pass_count += 1
-            for token in row["rejected_by"].split(","):
+            for token in row["rejected_by"].split(FAILS_DELIM):
                 if token:
                     gate_fail_tally[token] += 1
 
@@ -512,6 +513,8 @@ def stage_c(trading_client, option_client, policy, survivors_b, max_chains, avai
             print(f"  {gate:28s}: {cnt}")
     else:
         print("  (no contracts evaluated)")
+    fail_count = len(all_rows) - all_pass_count
+    print(f"reject tokens: {sum(gate_fail_tally.values())} across {fail_count} failing contracts")
 
     SCANS_DIR.mkdir(exist_ok=True)
     chains_path = SCANS_DIR / f"chains_{run_ts_str}.csv"
@@ -593,6 +596,11 @@ def stage_d(trading_client, coll, stage_a_count, stage_b_result, stage_c_result,
                 lines.append(f"  {gate:28s}: {cnt}")
         else:
             lines.append("  (no contracts evaluated)")
+        fail_count = len(stage_c_result["rows"]) - stage_c_result["all_pass_count"]
+        lines.append(
+            f"reject tokens: {sum(stage_c_result['gate_fail_tally'].values())} "
+            f"across {fail_count} failing contracts"
+        )
         lines.append("")
         lines.append("all_pass contracts ranked by annualized_yield_pct descending:")
         passers = [r for r in stage_c_result["rows"] if r["all_pass"]]
