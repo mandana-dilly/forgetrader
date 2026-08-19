@@ -145,6 +145,9 @@ def compute_collateral_numbers(trading_client, policy):
     available = cash * (1 - reserve_pct)
     max_strike = floor(available / 100)
     otm_target_pct = policy["entry"]["otm_target_pct"]
+    # Derived affordability ceiling, not a config value: recomputed each run from
+    # available collateral. Do NOT move to policy.toml - it is a function of cash, not a
+    # tunable. The binding affordability check is the Stage C collateral gate.
     max_underlying = max_strike / (1 - otm_target_pct / 100)
 
     print(f"cash                 : {cash:.2f}")
@@ -610,15 +613,21 @@ def stage_d(trading_client, coll, stage_a_count, stage_b_result, stage_c_result,
             f"across {fail_count} failing contracts"
         )
         lines.append("")
-        lines.append("all_pass contracts ranked by annualized_yield_pct descending:")
+        lines.append("all_pass contracts ranked by open_interest descending:")
         passers = [r for r in stage_c_result["rows"] if r["all_pass"]]
-        passers.sort(key=lambda r: r["annualized_yield_pct"], reverse=True)
+        passers.sort(
+            key=lambda r: (
+                int(r["open_interest"]) if str(r["open_interest"]).strip() != "" else -1,
+                r["annualized_yield_pct"] if r["annualized_yield_pct"] != "" else -1,
+            ),
+            reverse=True,
+        )
         if passers:
-            lines.append(f"  {'symbol':<8} {'contract':<24} {'strike':>8} {'dte':>4} {'bid':>8} {'yield%':>8}")
+            lines.append(f"  {'symbol':<8} {'contract':<24} {'strike':>8} {'dte':>4} {'bid':>8} {'oi':>8} {'yield%':>8}")
             for r in passers:
                 lines.append(
                     f"  {r['underlying_symbol']:<8} {r['contract_symbol']:<24} "
-                    f"{r['strike']:>8.2f} {r['dte']:>4} {r['bid']:>8.2f} {r['annualized_yield_pct']:>8.2f}"
+                    f"{r['strike']:>8.2f} {r['dte']:>4} {r['bid']:>8.2f} {str(r['open_interest']):>8} {r['annualized_yield_pct']:>8.2f}"
                 )
         else:
             lines.append("  (none)")
