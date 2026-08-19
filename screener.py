@@ -278,7 +278,7 @@ def stage_b(stock_client, trading_client, policy, survivors, feed, run_ts_str):
 # ---------------------------------------------------------------------------
 def evaluate_contract(contract, snap, underlying_price, underlying_price_ts,
                        underlying_staleness_min, today, dte_min, dte_max,
-                       otm_target_pct, min_bid, min_oi, max_spread_abs,
+                       otm_target_pct, min_bid, min_oi, max_spread_abs, max_spread_to_bid_ratio,
                        min_yield_pct, available, max_staleness_min):
     fails = []
 
@@ -356,10 +356,17 @@ def evaluate_contract(contract, snap, underlying_price, underlying_price_ts,
     if spread_abs is None:
         spread_pass = False
         fails.append("undefined_metric_spread")
+    elif spread_abs > max_spread_abs:
+        spread_pass = False
+        fails.append("spread_too_wide")
+    elif bid is None or bid <= 0:
+        spread_pass = False
+        fails.append("spread_ratio_undefined_no_bid")
+    elif spread_abs > max_spread_to_bid_ratio * bid:
+        spread_pass = False
+        fails.append("spread_wide_vs_bid")
     else:
-        spread_pass = spread_abs <= max_spread_abs
-        if not spread_pass:
-            fails.append("spread_too_wide")
+        spread_pass = True
 
     collateral = strike * 100
     collateral_pass = collateral <= available
@@ -420,6 +427,7 @@ def stage_c(trading_client, option_client, policy, survivors_b, max_chains, avai
     min_bid = entry["min_bid"]
     min_oi = entry["min_open_interest"]
     max_spread_abs = entry["max_spread_abs"]
+    max_spread_to_bid_ratio = entry["max_spread_to_bid_ratio"]
     min_yield_pct = entry["min_annualized_yield_pct"]
     max_staleness_min = policy["universe"]["max_price_staleness_min"]
 
@@ -492,7 +500,7 @@ def stage_c(trading_client, option_client, policy, survivors_b, max_chains, avai
                 c, snapshots.get(c.symbol), underlying_price,
                 underlying_price_ts.isoformat(), underlying_staleness_min, today,
                 dte_min, dte_max, otm_target_pct, min_bid, min_oi,
-                max_spread_abs, min_yield_pct, available, max_staleness_min,
+                max_spread_abs, max_spread_to_bid_ratio, min_yield_pct, available, max_staleness_min,
             )
             row["underlying_symbol"] = symbol
             all_rows.append(row)

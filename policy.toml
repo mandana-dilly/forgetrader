@@ -11,6 +11,7 @@ max_spread_abs = 0.10          # PROVISIONAL, set from 3 Aug 2026 live session,
                                # 273 gate survivors: p25 0.14 p50 0.25 p75 0.54.
                                # Replaced max_spread_pct: percentage spread measures
                                # tick granularity, not liquidity, at sub-$1 premiums.
+max_spread_to_bid_ratio = 0.5   # spread must not exceed half the credit received
 min_annualized_yield_pct = 7   # PROVISIONAL, learning phase. Indexed to risk-free
                                # rate, not to capital. NOTE: 272/273 survivors in the
                                # 3 Aug session cleared 15%, so this gate is currently
