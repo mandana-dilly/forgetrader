@@ -4,8 +4,8 @@
     {
       "ticker": "NOK",
       "added": "2026-08-24",
-      "earnings_date": null,
-      "earnings_source": "PENDING - stamp from nokia.com IR",
+      "earnings_date": "2026-10-22",
+      "earnings_source": "https://www.nokia.com/about-us/investors/investor-relations-events/",
       "earnings_stamped": "2026-08-24",
       "own_100_note": "Willing to own 100 shares of NOK at strike if assigned; core telecom infra holding.",
       "review_by": "2026-11-22"
