@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "entries": [
+    {
+      "ticker": "MSFT",
+      "added": "2026-01-01",
+      "earnings_date": "2026-10-29",
+      "earnings_source": "https://microsoft.com/investor",
+      "earnings_stamped": "2026-08-20",
+      "own_100_note": "Own 100 shares comfortably through an earnings cycle.",
+      "review_by": "2026-11-20"
+    },
+    {
+      "ticker": "MSFT",
+      "added": "2026-01-05",
+      "earnings_date": "2026-10-29",
+      "earnings_source": "https://microsoft.com/investor",
+      "earnings_stamped": "2026-08-21",
+      "own_100_note": "Second entry for the same ticker, added by mistake.",
+      "review_by": "2026-11-21"
+    }
+  ]
+}

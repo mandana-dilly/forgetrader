@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "entries": [
+    {
+      "ticker": "NVDA",
+      "added": "2026-01-01",
+      "earnings_date": "2026-11-19",
+      "earnings_source": "https://investor.nvidia.com/earnings-calendar",
+      "earnings_stamped": "2026-08-20",
+      "own_100_note": "Own 100 shares comfortably through an earnings cycle.",
+      "review_by": "2026-06-01"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "entries": [
+    {
+      "ticker": "TSLA",
+      "added": "2026-01-01",
+      "earnings_date": "2026-08-01",
+      "earnings_source": "https://ir.tesla.com/earnings-calendar",
+      "earnings_stamped": "2026-07-25",
+      "own_100_note": "Own 100 shares comfortably through an earnings cycle.",
+      "review_by": "2026-11-20"
+    }
+  ]
+}

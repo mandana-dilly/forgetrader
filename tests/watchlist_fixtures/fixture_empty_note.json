@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "entries": [
+    {
+      "ticker": "AMD",
+      "added": "2026-01-01",
+      "earnings_date": "2026-10-29",
+      "earnings_source": "https://ir.amd.com/earnings-calendar",
+      "earnings_stamped": "2026-08-20",
+      "own_100_note": "   ",
+      "review_by": "2026-11-20"
+    }
+  ]
+}
