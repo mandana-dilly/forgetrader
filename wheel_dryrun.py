@@ -29,6 +29,7 @@ The earnings reject token "earnings_inside_option" is appended onto the shared
 rejected_by string here, so gates.py stays untouched.
 """
 import argparse
+import csv
 import os
 import sys
 import time
@@ -65,6 +66,20 @@ WATCHLIST_PATH = SCRIPT_DIR / "watchlist.json"
 # Appended onto the shared rejected_by string when the contract's expiry is not
 # strictly before the name's earnings_date (or the date is unparseable).
 EARNINGS_REJECT_TOKEN = "earnings_inside_option"
+
+# Per-contract CSV columns. The list up to and including "rejected_by" is copied
+# verbatim from screener.stage_c's fieldnames (rejected_by is the shared string,
+# already augmented here with EARNINGS_REJECT_TOKEN). The trailing two are the
+# engine-owned fields this script appends onto every evaluate_contract row.
+CSV_FIELDNAMES = [
+    "underlying_symbol", "root_symbol", "underlying_price", "underlying_price_ts", "underlying_staleness_min",
+    "contract_symbol", "expiration_date", "dte", "dte_pass",
+    "strike", "otm_pct", "otm_pass", "bid", "ask", "mid", "bid_pass",
+    "open_interest", "oi_pass", "spread_abs", "spread_pct", "spread_pass",
+    "collateral", "collateral_pass", "annualized_yield_pct", "yield_pass",
+    "adjusted_pass", "staleness_pass", "all_pass", "rejected_by",
+    "earnings_pass", "final_pass",
+]
 
 
 def _et_now_str():
@@ -131,6 +146,20 @@ def _write_report(lines, run_ts_str):
     path = SCANS_DIR / f"wheel_dryrun_{run_ts_str}.txt"
     path.write_text("\n".join(lines) + "\n")
     print(f"\nwrote {path}")
+    return path
+
+
+def _write_csv(rows, run_ts_str):
+    """One per-contract CSV per run, same timestamp as the .txt. DictWriter
+    pattern copied from screener.stage_c."""
+    SCANS_DIR.mkdir(exist_ok=True)
+    path = SCANS_DIR / f"wheel_dryrun_{run_ts_str}.csv"
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=CSV_FIELDNAMES)
+        w.writeheader()
+        for r in rows:
+            w.writerow({k: r.get(k, "") for k in CSV_FIELDNAMES})
+    print(f"wrote {path}")
     return path
 
 
@@ -252,6 +281,7 @@ def main():
 
     reject_tally = Counter()
     passing_rows = []  # final_pass rows across every approved name
+    all_rows = []  # every evaluate_contract row, for the per-contract CSV
     per_name = []  # (ticker, one-line outcome)
     earnings_by_ticker = {}
 
@@ -402,6 +432,7 @@ def main():
                 )
             row["earnings_pass"] = earnings_pass
             row["final_pass"] = row["all_pass"] and earnings_pass
+            all_rows.append(row)
 
             name_eval += 1
             if row["final_pass"]:
@@ -491,6 +522,7 @@ def main():
         emit("  Nothing to propose. This is a correct empty result, not an error.")
 
     _write_report(lines, run_ts_str)
+    _write_csv(all_rows, run_ts_str)
     sys.exit(0)
 
 
