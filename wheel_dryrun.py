@@ -27,6 +27,14 @@ Gate order per name:
 
 The earnings reject token "earnings_inside_option" is appended onto the shared
 rejected_by string here, so gates.py stays untouched.
+
+Brief 11a - the scan was pulled out of main() into scan_watchlist(), which
+takes injected clients + an already-initialized throttle and returns a
+ScanResult. It does no printing, no file writing, no sys.exit: it collects
+the per-name gate traces into ScanResult.trace_lines, and main() renders the
+header, then those trace lines verbatim, then the tallies / candidates /
+proposal, then writes the files. Same bytes, same order - the logic only
+moved.
 """
 import argparse
 import csv
@@ -163,52 +171,64 @@ def _write_csv(rows, run_ts_str):
     return path
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Brief 8 wheel dry-run - read-only CSP proposer (no order path)"
-    )
-    parser.add_argument(
-        "--wait-for-open",
-        action="store_true",
-        help="poll get_clock() until the market opens, then run once (ftnight pattern)",
-    )
-    parser.add_argument(
-        "--max-poll-hours",
-        type=float,
-        default=20,
-        help="cap on --wait-for-open polling before giving up (default 20)",
-    )
-    args = parser.parse_args()
+class ScanResult:
+    """Everything one scan_watchlist() pass produced that main() needs to
+    render the report and write the CSV. No behaviour - just fields.
 
-    load_dotenv(dotenv_path=SCRIPT_DIR / ".env")
-    api_key = os.environ.get("ALPACA_API_KEY")
-    api_secret = os.environ.get("ALPACA_API_SECRET")
-    paper = os.environ.get("ALPACA_PAPER", "true").lower() == "true"
-    if not api_key or not api_secret:
-        print(
-            "FATAL: ALPACA_API_KEY or ALPACA_API_SECRET missing from .env",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    trace_lines        - the per-name gate-trace strings, in name order, built
+                         exactly as main()'s old `lines` were inside the loop;
+                         main() emits them verbatim between the header and the
+                         tallies.
+    passing_rows       - final_pass rows across every approved name, already
+                         sorted (open_interest desc, yield tiebreak).
+    all_rows           - every evaluate_contract row, for the per-contract CSV.
+    reject_tally       - Counter of reject tokens across all names.
+    per_name           - list of (ticker, one-line outcome).
+    earnings_by_ticker - {ticker: parsed earnings_date or None}.
+    coll               - compute_collateral_numbers() output.
+    approved / wl_rejected / wl_warnings - load_watchlist() output.
+    clock              - trading_client.get_clock() result.
+    chain_fetch_errors - preformatted stderr warning strings for any
+                         get_option_chain failure; main() prints them to
+                         stderr (kept out of the report, same as before).
+    dte_min / dte_max / exp_gte / exp_lte / min_underlying_price - policy-
+                         derived values the header block formats; computed
+                         once here so nothing is recomputed in main().
+    """
 
-    policy = load_policy()
-    init_throttle(policy["runtime"]["rate_limit_per_min"])
-    feed_str = policy["runtime"]["feed"]
-    feed = DataFeed(feed_str)
+    def __init__(self, *, trace_lines, passing_rows, all_rows, reject_tally,
+                 per_name, earnings_by_ticker, coll, approved, wl_rejected,
+                 wl_warnings, clock, chain_fetch_errors, dte_min, dte_max,
+                 exp_gte, exp_lte, min_underlying_price):
+        self.trace_lines = trace_lines
+        self.passing_rows = passing_rows
+        self.all_rows = all_rows
+        self.reject_tally = reject_tally
+        self.per_name = per_name
+        self.earnings_by_ticker = earnings_by_ticker
+        self.coll = coll
+        self.approved = approved
+        self.wl_rejected = wl_rejected
+        self.wl_warnings = wl_warnings
+        self.clock = clock
+        self.chain_fetch_errors = chain_fetch_errors
+        self.dte_min = dte_min
+        self.dte_max = dte_max
+        self.exp_gte = exp_gte
+        self.exp_lte = exp_lte
+        self.min_underlying_price = min_underlying_price
 
-    trading_client = TradingClient(api_key, api_secret, paper=paper)
-    stock_client = StockHistoricalDataClient(api_key, api_secret)
-    option_client = OptionHistoricalDataClient(api_key, api_secret)
 
-    if args.wait_for_open:
-        wait_for_open(trading_client, args.max_poll_hours)
+def scan_watchlist(trading_client, stock_client, option_client, policy, now_et,
+                   run_date):
+    """Pure-ish scan: assumes throttle already initialized and clients already
+    built. Returns ScanResult. Does NO printing, NO file writing, NO sys.exit.
+    The caller renders and writes.
 
-    # One timestamp for every artifact this run writes.
-    run_ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # DTE and the earnings comparison both anchor to the US/Eastern calendar
-    # date, not the host's local date.
-    now_et = datetime.now(ZoneInfo("America/New_York"))
-    run_date = now_et.date()
+    Raises WatchlistStructureError if the watchlist is unreadable - the caller
+    decides (main() prints FATAL and exits 1).
+    """
+    feed = DataFeed(policy["runtime"]["feed"])
 
     entry = policy["entry"]
     dte_min = entry["dte_min"]
@@ -232,75 +252,39 @@ def main():
     available = coll["available"]
     max_underlying = coll["max_underlying"]
 
-    try:
-        approved, wl_rejected, wl_warnings = load_watchlist(str(WATCHLIST_PATH), now_et)
-    except WatchlistStructureError as e:
-        print(f"FATAL: watchlist unreadable - {e}", file=sys.stderr)
-        sys.exit(1)
+    approved, wl_rejected, wl_warnings = load_watchlist(str(WATCHLIST_PATH), now_et)
 
     throttle("get_clock")
     clock = trading_client.get_clock()
 
-    lines = []
+    trace_lines = []
 
-    def emit(text=""):
-        print(text)
-        lines.append(text)
-
-    emit("WHEEL DRY-RUN - READ-ONLY. THIS SCRIPT PLACES NO ORDER, CANCELS NONE, MODIFIES NONE.")
-    emit("")
-    emit(f"run                  : {run_ts_str}")
-    emit(f"feed in use          : {feed_str}")
-    emit(f"DTE anchor (US/East) : {run_date}")
-    emit(
-        f"market clock         : timestamp={clock.timestamp} is_open={clock.is_open} "
-        f"next_open={clock.next_open} next_close={clock.next_close}"
-    )
-    emit("")
-    emit("collateral numbers:")
-    emit(f"  cash               : {coll['cash']:.2f}")
-    emit(f"  available          : {coll['available']:.2f}")
-    emit(f"  max_strike         : {coll['max_strike']}")
-    emit(f"  max_underlying     : {coll['max_underlying']:.4f}")
-    emit(f"  price band         : [{min_underlying_price:.2f}, {max_underlying:.4f}]")
-    emit(f"  fetch expiry window: [{exp_gte}, {exp_lte}]  (dte gate at {dte_min}-{dte_max})")
-    emit("")
-    emit(f"watchlist            : {WATCHLIST_PATH.name}")
-    emit(
-        f"  approved names      : {len(approved)}  "
-        f"({', '.join(e['ticker'] for e in approved) or '(none)'})"
-    )
-    emit(
-        f"  watchlist-rejected  : {len(wl_rejected)}  "
-        f"({', '.join(f'{t}:{r}' for t, r in wl_rejected) or '(none)'})"
-    )
-    emit(
-        f"  advisory warnings   : {len(wl_warnings)}  "
-        f"({', '.join(f'{t}:{w}' for t, w in wl_warnings) or '(none)'})"
-    )
+    def trace(text=""):
+        trace_lines.append(text)
 
     reject_tally = Counter()
     passing_rows = []  # final_pass rows across every approved name
     all_rows = []  # every evaluate_contract row, for the per-contract CSV
     per_name = []  # (ticker, one-line outcome)
     earnings_by_ticker = {}
+    chain_fetch_errors = []  # stderr warnings, rendered by main() (not the report)
 
     for e in approved:
         ticker = e["ticker"]
-        emit("")
-        emit(f"===== {ticker} =====")
-        emit("  gate: watchlist_member  -> PASS (on the approved list)")
+        trace("")
+        trace(f"===== {ticker} =====")
+        trace("  gate: watchlist_member  -> PASS (on the approved list)")
 
         earnings_raw = e.get("earnings_date")
         earnings_date = _parse_date(earnings_raw)
         earnings_by_ticker[ticker] = earnings_date
         if earnings_date is None:
-            emit(
+            trace(
                 f"  earnings_date reparse   -> UNPARSEABLE ({earnings_raw!r}) - "
                 f"fail-closed, every contract fails the earnings gate"
             )
         else:
-            emit(
+            trace(
                 f"  earnings_date reparse   -> {earnings_date}  "
                 f"(expiration_date must be strictly before this)"
             )
@@ -312,14 +296,14 @@ def main():
         )
         snap = snap_resp.get(ticker) if snap_resp is not None else None
         if snap is None:
-            emit("  gate: price/ceiling     -> FAIL (no_snapshot) - name rejected, no chain fetch")
+            trace("  gate: price/ceiling     -> FAIL (no_snapshot) - name rejected, no chain fetch")
             per_name.append((ticker, "REJECTED name-level: no_snapshot"))
             reject_tally["name:no_snapshot"] += 1
             continue
 
         price, price_src, price_ts = price_from_chain(snap)
         if price is None:
-            emit("  gate: price/ceiling     -> FAIL (null_price) - name rejected, no chain fetch")
+            trace("  gate: price/ceiling     -> FAIL (null_price) - name rejected, no chain fetch")
             per_name.append((ticker, "REJECTED name-level: null_price"))
             reject_tally["name:null_price"] += 1
             continue
@@ -327,13 +311,13 @@ def main():
         staleness_min = (
             datetime.now(timezone.utc) - price_ts
         ).total_seconds() / 60
-        emit(
+        trace(
             f"  price                  -> {price} "
             f"(source={price_src}, age={staleness_min:.2f} min)"
         )
 
         if price < min_underlying_price:
-            emit(
+            trace(
                 f"  gate: price/ceiling     -> FAIL (below_min_underlying_price: "
                 f"{price} < {min_underlying_price}) - name rejected, no chain fetch"
             )
@@ -341,14 +325,14 @@ def main():
             reject_tally["name:below_min_underlying_price"] += 1
             continue
         if price > max_underlying:
-            emit(
+            trace(
                 f"  gate: price/ceiling     -> FAIL (above_max_underlying: "
                 f"{price} > {max_underlying:.4f}) - name rejected, no chain fetch"
             )
             per_name.append((ticker, "REJECTED name-level: above_max_underlying"))
             reject_tally["name:above_max_underlying"] += 1
             continue
-        emit("  gate: price/ceiling     -> PASS")
+        trace("  gate: price/ceiling     -> PASS")
 
         # --- chain fetch: screener Stage C (paginated contracts + chain snap) ---
         contracts = []
@@ -382,9 +366,8 @@ def main():
                 )
             )
         except Exception as ex:
-            print(
-                f"  get_option_chain FAILED for {ticker}: {type(ex).__name__}: {ex}",
-                file=sys.stderr,
+            chain_fetch_errors.append(
+                f"  get_option_chain FAILED for {ticker}: {type(ex).__name__}: {ex}"
             )
             snapshots = {}
 
@@ -443,13 +426,150 @@ def main():
                     if tok:
                         reject_tally[tok] += 1
 
-        emit(
+        trace(
             f"  chain: contracts fetched={len(contracts)}  evaluated={name_eval}  "
             f"final_pass={name_pass}"
         )
         per_name.append(
             (ticker, f"{name_pass}/{name_eval} contract(s) pass all shared gates + earnings")
         )
+
+    passing_rows.sort(
+        key=lambda r: (_oi_sort_key(r), _yield_sort_key(r)), reverse=True
+    )
+
+    return ScanResult(
+        trace_lines=trace_lines,
+        passing_rows=passing_rows,
+        all_rows=all_rows,
+        reject_tally=reject_tally,
+        per_name=per_name,
+        earnings_by_ticker=earnings_by_ticker,
+        coll=coll,
+        approved=approved,
+        wl_rejected=wl_rejected,
+        wl_warnings=wl_warnings,
+        clock=clock,
+        chain_fetch_errors=chain_fetch_errors,
+        dte_min=dte_min,
+        dte_max=dte_max,
+        exp_gte=exp_gte,
+        exp_lte=exp_lte,
+        min_underlying_price=min_underlying_price,
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Brief 8 wheel dry-run - read-only CSP proposer (no order path)"
+    )
+    parser.add_argument(
+        "--wait-for-open",
+        action="store_true",
+        help="poll get_clock() until the market opens, then run once (ftnight pattern)",
+    )
+    parser.add_argument(
+        "--max-poll-hours",
+        type=float,
+        default=20,
+        help="cap on --wait-for-open polling before giving up (default 20)",
+    )
+    args = parser.parse_args()
+
+    load_dotenv(dotenv_path=SCRIPT_DIR / ".env")
+    api_key = os.environ.get("ALPACA_API_KEY")
+    api_secret = os.environ.get("ALPACA_API_SECRET")
+    paper = os.environ.get("ALPACA_PAPER", "true").lower() == "true"
+    if not api_key or not api_secret:
+        print(
+            "FATAL: ALPACA_API_KEY or ALPACA_API_SECRET missing from .env",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    policy = load_policy()
+    init_throttle(policy["runtime"]["rate_limit_per_min"])
+    feed_str = policy["runtime"]["feed"]
+
+    trading_client = TradingClient(api_key, api_secret, paper=paper)
+    stock_client = StockHistoricalDataClient(api_key, api_secret)
+    option_client = OptionHistoricalDataClient(api_key, api_secret)
+
+    if args.wait_for_open:
+        wait_for_open(trading_client, args.max_poll_hours)
+
+    # One timestamp for every artifact this run writes.
+    run_ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # DTE and the earnings comparison both anchor to the US/Eastern calendar
+    # date, not the host's local date.
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    run_date = now_et.date()
+
+    try:
+        result = scan_watchlist(
+            trading_client, stock_client, option_client, policy, now_et, run_date
+        )
+    except WatchlistStructureError as e:
+        print(f"FATAL: watchlist unreadable - {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # get_option_chain failures are stderr diagnostics, kept out of the report
+    # (same as before the extract - they were never appended to `lines`).
+    for msg in result.chain_fetch_errors:
+        print(msg, file=sys.stderr)
+
+    coll = result.coll
+    available = coll["available"]
+    max_underlying = coll["max_underlying"]
+    approved = result.approved
+    per_name = result.per_name
+    passing_rows = result.passing_rows
+    reject_tally = result.reject_tally
+    earnings_by_ticker = result.earnings_by_ticker
+    clock = result.clock
+
+    lines = []
+
+    def emit(text=""):
+        print(text)
+        lines.append(text)
+
+    emit("WHEEL DRY-RUN - READ-ONLY. THIS SCRIPT PLACES NO ORDER, CANCELS NONE, MODIFIES NONE.")
+    emit("")
+    emit(f"run                  : {run_ts_str}")
+    emit(f"feed in use          : {feed_str}")
+    emit(f"DTE anchor (US/East) : {run_date}")
+    emit(
+        f"market clock         : timestamp={clock.timestamp} is_open={clock.is_open} "
+        f"next_open={clock.next_open} next_close={clock.next_close}"
+    )
+    emit("")
+    emit("collateral numbers:")
+    emit(f"  cash               : {coll['cash']:.2f}")
+    emit(f"  available          : {coll['available']:.2f}")
+    emit(f"  max_strike         : {coll['max_strike']}")
+    emit(f"  max_underlying     : {coll['max_underlying']:.4f}")
+    emit(f"  price band         : [{result.min_underlying_price:.2f}, {max_underlying:.4f}]")
+    emit(f"  fetch expiry window: [{result.exp_gte}, {result.exp_lte}]  (dte gate at {result.dte_min}-{result.dte_max})")
+    emit("")
+    emit(f"watchlist            : {WATCHLIST_PATH.name}")
+    emit(
+        f"  approved names      : {len(approved)}  "
+        f"({', '.join(e['ticker'] for e in approved) or '(none)'})"
+    )
+    emit(
+        f"  watchlist-rejected  : {len(result.wl_rejected)}  "
+        f"({', '.join(f'{t}:{r}' for t, r in result.wl_rejected) or '(none)'})"
+    )
+    emit(
+        f"  advisory warnings   : {len(result.wl_warnings)}  "
+        f"({', '.join(f'{t}:{w}' for t, w in result.wl_warnings) or '(none)'})"
+    )
+
+    # Per-name gate traces: the same strings the old loop emit()'d in place,
+    # produced by scan_watchlist in name order, printed here verbatim.
+    for text in result.trace_lines:
+        emit(text)
 
     emit("")
     emit("===== PER-NAME OUTCOME =====")
@@ -466,10 +586,6 @@ def main():
             emit(f"  {tok:34s}: {cnt}")
     else:
         emit("  (nothing rejected)")
-
-    passing_rows.sort(
-        key=lambda r: (_oi_sort_key(r), _yield_sort_key(r)), reverse=True
-    )
 
     emit("")
     emit("===== CANDIDATES (final_pass) - ranked by open_interest desc, yield tiebreak =====")
@@ -522,7 +638,7 @@ def main():
         emit("  Nothing to propose. This is a correct empty result, not an error.")
 
     _write_report(lines, run_ts_str)
-    _write_csv(all_rows, run_ts_str)
+    _write_csv(result.all_rows, run_ts_str)
     sys.exit(0)
 
 
