@@ -45,12 +45,71 @@ def build_flat_snapshot(financials):
             "pending_order_status": None}
 
 
+def _proposal_line(row, is_open):
+    """One deterministic line: the proposed CSP's identity + the numbers that
+    matter, plus the market-open flag so morning-review can read it without
+    run.py branching on the clock."""
+    return (
+        f"propose_csp {row['underlying_symbol']} "
+        f"strike={row['strike']:.2f} right=P expiry={row['expiration_date']} "
+        f"bid={row['bid']} oi={row['open_interest']} "
+        f"annualized_yield_pct={row['annualized_yield_pct']} "
+        f"collateral={row['collateral']:.2f} market_open={is_open}"
+    )
+
+
+def _all_rejected_line(approved_n, reject_tally, is_open):
+    """One deterministic line for an empty scan: how many names were approved,
+    the market-open flag, and the most-common reject tokens - enough for
+    morning-review to tell a genuine all-rejected from a closed-market empty."""
+    top = ", ".join(f"{tok}={cnt}" for tok, cnt in reject_tally.most_common(5))
+    return (
+        f"all_rejected approved={approved_n} market_open={is_open} "
+        f"top_rejects=[{top}]"
+    )
+
+
 def run(dry_run=True):
     run_id = fs.new_run_id()
     conn = fs.journal_connect()
     try:
-        # 1. READ broker truth (raises on auth/network failure - let it)
-        financials = fs.read_broker_financials()
+        # 0. Build the SDK clients ONCE for this process. All imports are local
+        #    so `import forgetrader.run` still needs no alpaca-py (Brief 10 rule).
+        import os
+        from dotenv import load_dotenv
+        from alpaca.trading.client import TradingClient
+        from alpaca.data.historical.stock import StockHistoricalDataClient
+        from alpaca.data.historical.option import OptionHistoricalDataClient
+        import screener
+        import wheel_dryrun
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        load_dotenv()
+        api_key = os.environ.get("ALPACA_API_KEY")
+        api_secret = os.environ.get("ALPACA_API_SECRET")
+        paper = os.environ.get("ALPACA_PAPER", "true").lower() == "true"
+        if not api_key or not api_secret:
+            raise RuntimeError(
+                "ALPACA_API_KEY or ALPACA_API_SECRET missing from .env")
+
+        trading_client = TradingClient(api_key, api_secret, paper=paper)
+        stock_client = StockHistoricalDataClient(api_key, api_secret)
+        option_client = OptionHistoricalDataClient(api_key, api_secret)
+
+        # Policy + throttle must be ready before any scan (scan_watchlist's
+        # docstring requires the shared throttle pre-initialized).
+        policy = screener.load_policy()
+        screener.init_throttle(policy["runtime"]["rate_limit_per_min"])
+
+        # Mirror wheel_dryrun.main(): DTE / earnings anchor to the US/Eastern
+        # calendar date, not the host's local date.
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        run_date = now_et.date()
+
+        # 1. READ broker truth (raises on auth/network failure - let it).
+        #    Inject the client built above so the process constructs exactly one.
+        financials = fs.read_broker_financials(trading_client=trading_client)
         # 2. LOAD prior state if present, else fresh FLAT; this run only supports FLAT
         try:
             state = fs.load_state()
@@ -78,6 +137,29 @@ def run(dry_run=True):
         new_state, action = fs.reconcile_and_handle(
             state, snapshot, conn=conn, run_id=run_id)
         # 6. Expected at FLAT/zero-pos: "noop:FLAT stable". Anything else is notable.
+        #    Only on the noop (FLAT-stable) path do we scan the approved
+        #    watchlist once. A non-noop at FLAT is the "look at it" signal, not a
+        #    scan trigger - fall straight through to the return 4 path.
+        if action.startswith("noop"):
+            result = wheel_dryrun.scan_watchlist(
+                trading_client, stock_client, option_client, policy,
+                now_et, run_date)
+            is_open = getattr(result.clock, "is_open", None)
+            if result.passing_rows:
+                proposal = result.passing_rows[0]  # already OI-desc sorted
+                scan_action = "propose_csp"
+                detail = _proposal_line(proposal, is_open)
+            else:
+                scan_action = "all_rejected"
+                detail = _all_rejected_line(
+                    len(result.approved), result.reject_tally, is_open)
+            # Exactly one decisions row for the scan outcome. No order path.
+            fs.record_decision(conn, run_id, stage_from=fs.FLAT,
+                               stage_to=fs.FLAT, action=scan_action, detail=detail)
+            # Compact stdout summary only - no gate trace, no scans/*.txt/*.csv
+            # (that stays wheel_dryrun.main()'s job). run.py is a consumer.
+            print(f"SCAN {scan_action}")
+            print(f"  {detail}")
         # 7. WRITE state (atomic), journal the run outcome
         new_state["last_run"] = {"ts": fs._now_iso(),
                                  "outcome": f"dryrun:{action}"}

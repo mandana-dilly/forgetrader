@@ -452,21 +452,29 @@ def reconcile_and_handle(state, broker_snapshot, conn=None, run_id=None):
 # SDK-touching helper (isolated; mirrors spine.py)                           #
 # --------------------------------------------------------------------------- #
 
-def read_broker_financials():
+def read_broker_financials(trading_client=None):
     """Reuse spine.py's auth pattern to read account + positions for a real
     state write. Import is local so unit tests never need alpaca-py. Raises on
-    any auth / network failure - the caller decides whether to fail closed."""
-    from dotenv import load_dotenv
-    from alpaca.trading.client import TradingClient
+    any auth / network failure - the caller decides whether to fail closed.
 
-    load_dotenv()
-    api_key = os.environ.get("ALPACA_API_KEY")
-    api_secret = os.environ.get("ALPACA_API_SECRET")
-    paper = os.environ.get("ALPACA_PAPER", "true").lower() == "true"
-    if not api_key or not api_secret:
-        raise RuntimeError("ALPACA_API_KEY or ALPACA_API_SECRET missing from .env")
+    trading_client: optional pre-built alpaca TradingClient. When supplied it is
+    reused as-is (no env read, no construction); when None the behaviour is
+    byte-identical to before - build our own via the local import + env read."""
+    if trading_client is not None:
+        client = trading_client
+    else:
+        from dotenv import load_dotenv
+        from alpaca.trading.client import TradingClient
 
-    client = TradingClient(api_key, api_secret, paper=paper)
+        load_dotenv()
+        api_key = os.environ.get("ALPACA_API_KEY")
+        api_secret = os.environ.get("ALPACA_API_SECRET")
+        paper = os.environ.get("ALPACA_PAPER", "true").lower() == "true"
+        if not api_key or not api_secret:
+            raise RuntimeError(
+                "ALPACA_API_KEY or ALPACA_API_SECRET missing from .env")
+
+        client = TradingClient(api_key, api_secret, paper=paper)
     acct = client.get_account()
     positions = client.get_all_positions()
 
