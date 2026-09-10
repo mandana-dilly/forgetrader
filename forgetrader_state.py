@@ -463,16 +463,11 @@ def read_broker_financials(trading_client=None):
     if trading_client is not None:
         client = trading_client
     else:
-        from dotenv import load_dotenv
         from alpaca.trading.client import TradingClient
 
-        load_dotenv()
-        api_key = os.environ.get("ALPACA_API_KEY")
-        api_secret = os.environ.get("ALPACA_API_SECRET")
-        paper = os.environ.get("ALPACA_PAPER", "true").lower() == "true"
-        if not api_key or not api_secret:
-            raise RuntimeError(
-                "ALPACA_API_KEY or ALPACA_API_SECRET missing from .env")
+        from credentials import load_credentials
+
+        api_key, api_secret, paper = load_credentials()
 
         client = TradingClient(api_key, api_secret, paper=paper)
     acct = client.get_account()

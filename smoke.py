@@ -12,6 +12,8 @@ from datetime import date, datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
+from credentials import CredentialsError, load_credentials
+
 from alpaca.common.exceptions import APIError
 from alpaca.data.historical.option import OptionHistoricalDataClient
 from alpaca.data.historical.stock import StockHistoricalDataClient
@@ -76,13 +78,10 @@ def main():
     parser.add_argument("--submit", action="store_true")
     args = parser.parse_args()
 
-    load_dotenv()
-    api_key = os.environ.get("ALPACA_API_KEY")
-    api_secret = os.environ.get("ALPACA_API_SECRET")
-    paper = os.environ.get("ALPACA_PAPER", "true").lower() == "true"
-
-    if not api_key or not api_secret:
-        print("FATAL: ALPACA_API_KEY or ALPACA_API_SECRET missing from .env", file=sys.stderr)
+    try:
+        api_key, api_secret, paper = load_credentials()
+    except CredentialsError as e:
+        print(f"FATAL: {e}", file=sys.stderr)
         sys.exit(1)
 
     trading_client = TradingClient(api_key, api_secret, paper=paper)

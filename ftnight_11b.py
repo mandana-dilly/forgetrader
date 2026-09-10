@@ -17,13 +17,9 @@ def log(m):
     print(f"[{datetime.now(timezone.utc).isoformat()}] {m}", flush=True)
 
 def get_clock():
-    from dotenv import load_dotenv
     from alpaca.trading.client import TradingClient
-    load_dotenv(REPO / ".env")
-    k = os.environ.get("ALPACA_API_KEY"); s = os.environ.get("ALPACA_API_SECRET")
-    paper = os.environ.get("ALPACA_PAPER", "true").lower() == "true"
-    if not k or not s:
-        raise RuntimeError("ALPACA_API_KEY or ALPACA_API_SECRET missing from .env")
+    from credentials import load_credentials
+    k, s, paper = load_credentials()
     return TradingClient(k, s, paper=paper).get_clock()
 
 def wait_for_open(tight=30, cap=1800):

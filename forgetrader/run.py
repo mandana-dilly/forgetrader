@@ -75,8 +75,6 @@ def run(dry_run=True):
     try:
         # 0. Build the SDK clients ONCE for this process. All imports are local
         #    so `import forgetrader.run` still needs no alpaca-py (Brief 10 rule).
-        import os
-        from dotenv import load_dotenv
         from alpaca.trading.client import TradingClient
         from alpaca.data.historical.stock import StockHistoricalDataClient
         from alpaca.data.historical.option import OptionHistoricalDataClient
@@ -85,13 +83,9 @@ def run(dry_run=True):
         from datetime import datetime
         from zoneinfo import ZoneInfo
 
-        load_dotenv()
-        api_key = os.environ.get("ALPACA_API_KEY")
-        api_secret = os.environ.get("ALPACA_API_SECRET")
-        paper = os.environ.get("ALPACA_PAPER", "true").lower() == "true"
-        if not api_key or not api_secret:
-            raise RuntimeError(
-                "ALPACA_API_KEY or ALPACA_API_SECRET missing from .env")
+        from credentials import load_credentials
+
+        api_key, api_secret, paper = load_credentials()
 
         trading_client = TradingClient(api_key, api_secret, paper=paper)
         stock_client = StockHistoricalDataClient(api_key, api_secret)

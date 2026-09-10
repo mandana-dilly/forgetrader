@@ -3,19 +3,15 @@
 ForgeTrader spine - proves alpaca-py can authenticate and read account state.
 Does nothing but read. No orders, no writes, no side effects.
 """
-import os
 import sys
-from dotenv import load_dotenv
 from alpaca.trading.client import TradingClient
 
-load_dotenv()
+from credentials import CredentialsError, load_credentials
 
-API_KEY = os.environ.get("ALPACA_API_KEY")
-API_SECRET = os.environ.get("ALPACA_API_SECRET")
-PAPER = os.environ.get("ALPACA_PAPER", "true").lower() == "true"
-
-if not API_KEY or not API_SECRET:
-    print("FATAL: ALPACA_API_KEY or ALPACA_API_SECRET missing from .env", file=sys.stderr)
+try:
+    API_KEY, API_SECRET, PAPER = load_credentials()
+except CredentialsError as e:
+    print(f"FATAL: {e}", file=sys.stderr)
     sys.exit(1)
 
 client = TradingClient(API_KEY, API_SECRET, paper=PAPER)
