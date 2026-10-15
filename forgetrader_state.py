@@ -449,10 +449,84 @@ def reconcile_and_handle(state, broker_snapshot, conn=None, run_id=None):
 
 
 # --------------------------------------------------------------------------- #
+# Broker snapshot producer (pure; consumed by reconcile)                      #
+# --------------------------------------------------------------------------- #
+
+class SnapshotError(RuntimeError):
+    """Broker facts do not match what the wheel expects. Fail closed."""
+
+
+def build_snapshot(wheel, financials):
+    """Pure. Map read_broker_financials() output + the wheel dict to the exact
+    4-key snapshot reconcile() consumes. Anything unexpected raises
+    SnapshotError - positions are truth, nothing is silently ignored."""
+    if "positions" not in financials or "open_orders" not in financials:
+        raise SnapshotError("financials missing positions or open_orders")
+
+    ticker = wheel.get("ticker")
+    contract = wheel.get("contract_symbol")
+    tracked_coid = wheel.get("client_order_id")
+    stage = wheel["stage"]
+
+    shares = 0
+    contract_open = False
+    for p in financials["positions"]:
+        qty = p["qty"]
+        sym = p["symbol"]
+        if qty is None or not isinstance(qty, int) or isinstance(qty, bool):
+            raise SnapshotError(f"position {sym} qty {qty!r} is not an int")
+        if ticker and sym == ticker:
+            shares = qty
+        elif contract and sym == contract:
+            if qty != -1:
+                raise SnapshotError(
+                    f"tracked contract {sym} qty {qty}, expected -1")
+            contract_open = True
+        else:
+            raise SnapshotError(f"unexpected position {sym} qty {qty}")
+
+    put_open = False
+    call_open = False
+    if contract_open:
+        if len(contract) < 16 or not contract[-8:].isdigit():
+            raise SnapshotError(f"malformed contract symbol {contract!r}")
+        right = contract[-9]
+        if right == "P":
+            put_open = True
+        elif right == "C":
+            call_open = True
+        else:
+            raise SnapshotError(
+                f"malformed contract symbol {contract!r}: right {right!r}")
+
+    for o in financials["open_orders"]:
+        tolerated = (
+            stage in (CSP_PENDING, CC_PENDING)
+            and tracked_coid is not None
+            and o["client_order_id"] == tracked_coid
+        )
+        if not tolerated:
+            raise SnapshotError(
+                f"unexpected open order {o['symbol']} "
+                f"{o['client_order_id']} {o['status']}")
+
+    pending = None
+    if stage in (CSP_PENDING, CC_PENDING):
+        pending = financials.get("tracked_order_status")
+
+    return {
+        "shares": shares,
+        "put_open": put_open,
+        "call_open": call_open,
+        "pending_order_status": pending,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # SDK-touching helper (isolated; mirrors spine.py)                           #
 # --------------------------------------------------------------------------- #
 
-def read_broker_financials(trading_client=None):
+def read_broker_financials(trading_client=None, tracked_client_order_id=None):
     """Reuse spine.py's auth pattern to read account + positions for a real
     state write. Import is local so unit tests never need alpaca-py. Raises on
     any auth / network failure - the caller decides whether to fail closed.
@@ -473,6 +547,23 @@ def read_broker_financials(trading_client=None):
     acct = client.get_account()
     positions = client.get_all_positions()
 
+    from alpaca.common.exceptions import APIError
+    from alpaca.trading.enums import QueryOrderStatus
+    from alpaca.trading.requests import GetOrdersRequest
+
+    open_orders = client.get_orders(
+        GetOrdersRequest(status=QueryOrderStatus.OPEN))
+    tracked_order_status = None
+    if tracked_client_order_id is not None:
+        try:
+            tracked_order_status = client.get_order_by_client_id(
+                tracked_client_order_id).status.value
+        except APIError as e:
+            if getattr(e, "status_code", None) == 404:
+                tracked_order_status = "not_found"
+            else:
+                raise
+
     raw_obp = getattr(acct, "options_buying_power", "n/a")
     return {
         "equity": _safe_float(acct.equity) or 0.0,
@@ -487,6 +578,16 @@ def read_broker_financials(trading_client=None):
             }
             for p in positions
         ],
+        "open_orders": [
+            {
+                "id": str(o.id),
+                "client_order_id": o.client_order_id,
+                "symbol": o.symbol,
+                "status": o.status.value,
+            }
+            for o in open_orders
+        ],
+        "tracked_order_status": tracked_order_status,
     }
 
 
