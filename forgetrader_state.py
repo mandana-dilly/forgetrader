@@ -614,7 +614,7 @@ def cmd_init(_args):
     if STATE_PATH.exists():
         print(f"REFUSE: {STATE_PATH} exists. init never overwrites. Move it aside "
               f"deliberately if a fresh FLAT state is truly intended.", file=sys.stderr)
-        return 2
+        return 3
     financials = {}
     try:
         financials = read_broker_financials()
@@ -646,12 +646,12 @@ def cmd_set_state(args):
     stage = args.set_state
     if stage not in STAGES:
         print(f"invalid stage {stage!r}; one of {STAGES}", file=sys.stderr)
-        return 2
+        return 3
     try:
         state = load_state()
     except FileNotFoundError:
         print(f"no state at {STATE_PATH} - run --init first", file=sys.stderr)
-        return 1
+        return 3
 
     stage_from = state["wheel"]["stage"]
     state["wheel"]["stage"] = stage

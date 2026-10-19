@@ -1,48 +1,37 @@
 #!/usr/bin/env python3
-"""Brief 10 (B-minimal) - the first integrated, Alpaca-touching run path.
+"""forgetrader run path - dry-run, run-to-completion, single pass, no loop.
 
-Run-to-completion, single pass, no loop, no daemon:
-  1. read real account state via forgetrader_state.read_broker_financials
-  2. load prior state.json if present, else build a fresh FLAT state
-  3. refresh the money fields on that FLAT state from this read
-  4. build a guarded zero-position FLAT broker snapshot
-  5. run reconcile_and_handle FLAT-against-FLAT (journals the decision;
-     dumps + alerts on HALT)
-  6. write state.json atomically, journal the run, exit per the code contract
-
-Scope: provable TODAY at position ZERO. It does NOT build the
-facts->snapshot mapper (Brief A) and does NOT submit orders. Non-FLAT prior
-state is out of scope (exit 3), not a failure.
+Run sequence:
+  1. LOAD state.json first. Missing -> HALT:state_missing (exit 4); run.py
+     never creates state (only `forgetrader_state.py --init` does). Corrupt
+     state is an uncaught loud failure.
+  2. Build the Alpaca clients, load policy, init the throttle.
+  3. READ broker truth via read_broker_financials; the wheel's tracked
+     client_order_id is passed only at CSP_PENDING / CC_PENDING.
+  4. build_snapshot(wheel, financials) -> the 4-key snapshot; SnapshotError
+     -> HALT:snapshot (dump + alert + journal, exit 4).
+  5. reconcile_and_handle at ANY stage (dumps + alerts + journals on HALT).
+     HALT -> exit 4 with no money refresh.
+  6. Non-HALT: refresh the money fields on the new state.
+  7. Scan the watchlist ONLY on exactly "noop:FLAT stable". At HOLDING,
+     journal hold:stage2_not_built and warn (Stage 2 is not built).
+  8. Write state.json atomically, journal the run, exit 0.
 
 Invoked as `python -m forgetrader.run` from ~/forgetrader, where cwd is on
-sys.path so the flat sibling module imports below resolve.
+sys.path so the flat sibling module imports below resolve. No order is ever
+submitted.
 
 Exit codes (morning-review contract):
-  0  clean FLAT noop (expected happy path today)
-  3  prior state stage != FLAT (out of scope for this brief)
-  4  reconcile returned non-noop at FLAT (HALT / unexpected transition)
-  non-zero via uncaught exception = auth / network / guard failure (loud)
+  0  ok / noop / legal transition
+  1  uncaught exception (auth / network / corrupt state)
+  2  argparse error
+  3  init / set-state refused
+  4  HALT (state_missing | snapshot | reconcile)
 """
 import argparse
 import sys
 
 import forgetrader_state as fs
-
-
-def build_flat_snapshot(financials):
-    """FLAT-only. Assert the broker confirms zero positions, then return the
-    canonical FLAT snapshot. HALT (raise) if positions are non-empty - that is
-    the signal the real facts->snapshot mapper (Brief A) is needed and this
-    hardcoded path is no longer valid."""
-    positions = financials.get("positions") or []
-    if len(positions) != 0:
-        raise RuntimeError(
-            f"FLAT run path but broker shows {len(positions)} position(s): "
-            f"{[p.get('symbol') for p in positions]}. Zero-position snapshot is "
-            f"invalid here; the facts->snapshot mapper (Brief A) is required."
-        )
-    return {"shares": 0, "put_open": False, "call_open": False,
-            "pending_order_status": None}
 
 
 def _proposal_line(row, is_open):
@@ -69,12 +58,36 @@ def _all_rejected_line(approved_n, reject_tally, is_open):
     )
 
 
+def _halt_exit(conn, run_id, state, action):
+    """Common HALT tail: last_run only (NO money refresh), write, journal, 4."""
+    state["last_run"] = {"ts": fs._now_iso(), "outcome": f"dryrun:{action}"}
+    fs.write_state(state)
+    fs.record_run(conn, run_id, f"dryrun:{action}")
+    return 4
+
+
 def run(dry_run=True):
     run_id = fs.new_run_id()
     conn = fs.journal_connect()
     try:
-        # 0. Build the SDK clients ONCE for this process. All imports are local
-        #    so `import forgetrader.run` still needs no alpaca-py (Brief 10 rule).
+        # 1. LOAD state FIRST. Missing state is a HALT, never a creation path:
+        #    write_state is deliberately NOT called here. Corrupt JSON is not
+        #    caught - it stays a loud uncaught failure.
+        try:
+            state = fs.load_state()
+        except FileNotFoundError:
+            fs.alert_stub(f"HALT state_missing | {fs.STATE_PATH} absent; "
+                          f"run --init deliberately")
+            fs.record_run(conn, run_id, "HALT:state_missing")
+            print(f"HALT state_missing: {fs.STATE_PATH} absent; run --init "
+                  f"deliberately", file=sys.stderr)
+            return 4
+        stage = state["wheel"]["stage"]
+        tracked = (state["wheel"].get("client_order_id")
+                   if stage in (fs.CSP_PENDING, fs.CC_PENDING) else None)
+
+        # 2. Build the SDK clients ONCE for this process. All imports are local
+        #    so `import forgetrader.run` still needs no alpaca-py.
         from alpaca.trading.client import TradingClient
         from alpaca.data.historical.stock import StockHistoricalDataClient
         from alpaca.data.historical.option import OptionHistoricalDataClient
@@ -101,40 +114,36 @@ def run(dry_run=True):
         now_et = datetime.now(ZoneInfo("America/New_York"))
         run_date = now_et.date()
 
-        # 1. READ broker truth (raises on auth/network failure - let it).
-        #    Inject the client built above so the process constructs exactly one.
-        financials = fs.read_broker_financials(trading_client=trading_client)
-        # 2. LOAD prior state if present, else fresh FLAT; this run only supports FLAT
+        # 3. READ broker truth (raises on auth/network failure - let it).
+        financials = fs.read_broker_financials(
+            trading_client=trading_client, tracked_client_order_id=tracked)
+
+        # 4. BUILD the snapshot; broker/wheel mismatch fails closed.
         try:
-            state = fs.load_state()
-        except FileNotFoundError:
-            state = fs.fresh_flat_state(
-                equity=financials["equity"], cash=financials["cash"],
-                options_buying_power=financials["options_buying_power"],
-                positions=financials["positions"], last_outcome="dryrun_init")
-        stage = state["wheel"]["stage"]
-        if stage != fs.FLAT:
-            # B-minimal only handles FLAT. Non-FLAT is not an error in the code -
-            # it is out of scope for this brief. Journal + exit non-zero loud.
-            fs.record_run(conn, run_id, f"out_of_scope_stage:{stage}")
-            print(f"BRIEF 10 SCOPE: state stage is {stage}, this path only handles "
-                  f"FLAT. Later briefs handle the rest.", file=sys.stderr)
-            return 3
-        # 3. Refresh the money fields on the FLAT state from this read
-        state["equity"] = financials["equity"]
-        state["cash"] = financials["cash"]
-        state["options_buying_power"] = financials["options_buying_power"]
-        state["positions"] = financials["positions"]
-        # 4. BUILD guarded FLAT snapshot (raises if positions non-empty)
-        snapshot = build_flat_snapshot(financials)
-        # 5. RECONCILE (fires dump+alert+journal on HALT; journals decision always)
+            snapshot = fs.build_snapshot(state["wheel"], financials)
+        except fs.SnapshotError as e:
+            reason = f"snapshot {e}"
+            path = fs.dump_halt(financials, state, reason)
+            fs.alert_stub(f"HALT {reason} | dump {path}")
+            fs.record_decision(conn, run_id, stage_from=stage, stage_to=stage,
+                               action=f"HALT:{reason}", detail="")
+            return _halt_exit(conn, run_id, state, f"HALT:{reason}")
+
+        # 5. RECONCILE at any stage (dumps + alerts + journals on HALT itself).
         new_state, action = fs.reconcile_and_handle(
             state, snapshot, conn=conn, run_id=run_id)
-        # 6. Expected at FLAT/zero-pos: "noop:FLAT stable". Anything else is notable.
-        #    Only on the noop (FLAT-stable) path do we scan the approved
-        #    watchlist once. A non-noop at FLAT is the "look at it" signal, not a
-        #    scan trigger - fall straight through to the return 4 path.
-        if action.startswith("noop"):
+        if action.startswith("HALT:"):
+            return _halt_exit(conn, run_id, new_state, action)
+
+        # 6. Non-HALT: refresh the money fields from this read.
+        new_state["equity"] = financials["equity"]
+        new_state["cash"] = financials["cash"]
+        new_state["options_buying_power"] = financials["options_buying_power"]
+        new_state["positions"] = financials["positions"]
+
+        # 7. Scan only on exactly "noop:FLAT stable" (a transition INTO FLAT
+        #    this run does not scan; the next run does).
+        if action == "noop:FLAT stable":
             result = wheel_dryrun.scan_watchlist(
                 trading_client, stock_client, option_client, policy,
                 now_et, run_date)
@@ -154,7 +163,14 @@ def run(dry_run=True):
             # (that stays wheel_dryrun.main()'s job). run.py is a consumer.
             print(f"SCAN {scan_action}")
             print(f"  {detail}")
-        # 7. WRITE state (atomic), journal the run outcome
+        elif new_state["wheel"]["stage"] == fs.HOLDING:
+            fs.record_decision(conn, run_id, stage_from=fs.HOLDING,
+                               stage_to=fs.HOLDING,
+                               action="hold:stage2_not_built", detail=action)
+            print("WARNING: HOLDING - Stage 2 covered-call scan not built; "
+                  "wheel stalled", file=sys.stderr)
+
+        # 8. WRITE state (atomic), journal the run outcome
         new_state["last_run"] = {"ts": fs._now_iso(),
                                  "outcome": f"dryrun:{action}"}
         fs.write_state(new_state)
@@ -162,7 +178,7 @@ def run(dry_run=True):
         fs.record_event(conn, run_id, "dryrun_complete", detail=action)
         print(f"RUN OK  stage={new_state['wheel']['stage']}  action={action}  "
               f"state->{fs.STATE_PATH}")
-        return 0 if action.startswith("noop") else 4  # non-noop at FLAT = look at it
+        return 0
     finally:
         conn.close()
 
@@ -170,17 +186,17 @@ def run(dry_run=True):
 def main(argv=None):
     p = argparse.ArgumentParser(
         prog="forgetrader.run",
-        description="Brief 10 B-minimal: dry-run FLAT run-to-completion path.",
+        description="Dry-run, run-to-completion wheel path (no order submission).",
     )
     g = p.add_mutually_exclusive_group()
     g.add_argument("--dry-run", dest="dry_run", action="store_true", default=True,
-                   help="read account, reconcile FLAT-against-FLAT, write state "
-                        "(default; the only mode this brief implements)")
+                   help="read account, reconcile, write state "
+                        "(default; the only mode implemented)")
     g.add_argument("--live", dest="live", action="store_true",
-                   help="NOT implemented in Brief 10")
+                   help="NOT implemented")
     args = p.parse_args(argv)
     if getattr(args, "live", False):
-        p.error("live submission is not built (Brief 10 is dry-run only)")
+        p.error("live submission is not built (dry-run only)")
     return run(dry_run=True)
 
 

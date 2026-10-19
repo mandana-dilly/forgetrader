@@ -106,6 +106,8 @@ CANNED_FLAT_FINANCIALS = {
     "cash": 1300.0,
     "options_buying_power": 1300.0,
     "positions": [],
+    "open_orders": [],
+    "tracked_order_status": None,
 }
 
 # keys mirror wheel_dryrun.py:425 row-construction + the 7 keys read by
@@ -197,10 +199,18 @@ def _drive():
             lambda path=None: _orig_journal_connect(path or fs.JOURNAL_PATH)
         )
 
+        # --- seed state: run.py never creates state.json (missing -> HALT)
+        _orig_write_state(fs.fresh_flat_state(
+            equity=CANNED_FLAT_FINANCIALS["equity"],
+            cash=CANNED_FLAT_FINANCIALS["cash"],
+            options_buying_power=CANNED_FLAT_FINANCIALS["options_buying_power"],
+        ), tmp_state)
+
         # --- live seams (harness A: branch runs in place, nothing extracted)
         credentials.load_credentials = lambda: ("k", "s", True)
         fs.read_broker_financials = (
-            lambda trading_client=None: dict(CANNED_FLAT_FINANCIALS)
+            lambda trading_client=None, tracked_client_order_id=None:
+                dict(CANNED_FLAT_FINANCIALS)
         )
         fs.reconcile_and_handle = (
             lambda state, snap, conn=None, run_id=None: (
