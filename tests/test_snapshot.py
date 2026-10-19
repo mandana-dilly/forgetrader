@@ -79,6 +79,13 @@ FIXTURES = [
      fin(orders=[order(COID)]), "unexpected open order"),
     ("18-csp-open-tracked-order-still-open", wheel(fs.CSP_OPEN, PUT, COID),
      fin([pos(PUT, -1)], orders=[order(COID)]), "unexpected open order"),
+    ("19-csp-pending-no-coid", wheel(fs.CSP_PENDING, PUT, None), fin(),
+     "pending stage CSP_PENDING without client_order_id"),
+    ("20-cc-pending-tracked-none", wheel(fs.CC_PENDING, CALL, COID),
+     fin([pos("NOK", 100)], tracked=None),
+     "pending stage CC_PENDING tracked_order_status missing"),
+    ("21-csp-pending-not-found-ok", wheel(fs.CSP_PENDING, PUT, COID),
+     fin(tracked="not_found"), snap(0, False, False, "not_found")),
 ]
 
 def main():

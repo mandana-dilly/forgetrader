@@ -467,6 +467,11 @@ def build_snapshot(wheel, financials):
     contract = wheel.get("contract_symbol")
     tracked_coid = wheel.get("client_order_id")
     stage = wheel["stage"]
+    if stage in (CSP_PENDING, CC_PENDING):
+        if tracked_coid is None:
+            raise SnapshotError(f"pending stage {stage} without client_order_id")
+        if financials.get("tracked_order_status") is None:
+            raise SnapshotError(f"pending stage {stage} tracked_order_status missing")
 
     shares = 0
     contract_open = False
@@ -606,6 +611,10 @@ def cmd_show(_args):
 
 
 def cmd_init(_args):
+    if STATE_PATH.exists():
+        print(f"REFUSE: {STATE_PATH} exists. init never overwrites. Move it aside "
+              f"deliberately if a fresh FLAT state is truly intended.", file=sys.stderr)
+        return 2
     financials = {}
     try:
         financials = read_broker_financials()
