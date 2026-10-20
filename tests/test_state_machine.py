@@ -70,9 +70,9 @@ FAMILY_A = [
     ("A-legal-CSP_PENDING-fill",
      "CSP_PENDING", "fill",
      "CSP_PENDING->CSP_OPEN (fill)", "CSP_OPEN", True),
-    ("A-legal-CSP_PENDING-reject_or_cancel",
-     "CSP_PENDING", "reject_or_cancel",
-     "CSP_PENDING->FLAT (reject_or_cancel)", "FLAT", True),
+    ("A-legal-CSP_PENDING-cancel_or_expire",
+     "CSP_PENDING", "cancel_or_expire",
+     "CSP_PENDING->FLAT (cancel_or_expire)", "FLAT", True),
     ("A-legal-CSP_OPEN-assigned",
      "CSP_OPEN", "assigned",
      "CSP_OPEN->HOLDING (assigned)", "HOLDING", True),
@@ -85,9 +85,9 @@ FAMILY_A = [
     ("A-legal-CC_PENDING-fill",
      "CC_PENDING", "fill",
      "CC_PENDING->CC_OPEN (fill)", "CC_OPEN", True),
-    ("A-legal-CC_PENDING-reject_or_cancel",
-     "CC_PENDING", "reject_or_cancel",
-     "CC_PENDING->HOLDING (reject_or_cancel)", "HOLDING", True),
+    ("A-legal-CC_PENDING-cancel_or_expire",
+     "CC_PENDING", "cancel_or_expire",
+     "CC_PENDING->HOLDING (cancel_or_expire)", "HOLDING", True),
     ("A-legal-CC_OPEN-called_away",
      "CC_OPEN", "called_away",
      "CC_OPEN->FLAT (called_away)", "FLAT", True),
@@ -137,13 +137,14 @@ FAMILY_B = [
     ("B-tr-CSP_PENDING-filled",
      "CSP_PENDING", {"shares": 0, "pending_order_status": "filled"},
      "CSP_PENDING->CSP_OPEN (fill)", "CSP_OPEN", "transition"),
-    ("B-tr-CSP_PENDING-put_open-path",
+    ("B-halt-CSP_PENDING-put_open-none-status",
      "CSP_PENDING",
      {"shares": 0, "put_open": True, "pending_order_status": None},
-     "CSP_PENDING->CSP_OPEN (fill)", "CSP_OPEN", "transition"),
+     "HALT:CSP_PENDING unknown pending_order_status None",
+     "CSP_PENDING", "halt"),
     ("B-tr-CSP_PENDING-canceled",
      "CSP_PENDING", {"shares": 0, "pending_order_status": "canceled"},
-     "CSP_PENDING->FLAT (reject_or_cancel)", "FLAT", "transition"),
+     "CSP_PENDING->FLAT (cancel_or_expire)", "FLAT", "transition"),
     ("B-tr-CSP_OPEN-assigned",
      "CSP_OPEN", {"shares": 100, "put_open": False},
      "CSP_OPEN->HOLDING (assigned)", "HOLDING", "transition"),
@@ -153,19 +154,21 @@ FAMILY_B = [
     ("B-tr-CC_PENDING-filled",
      "CC_PENDING", {"shares": 100, "pending_order_status": "filled"},
      "CC_PENDING->CC_OPEN (fill)", "CC_OPEN", "transition"),
-    ("B-tr-CC_PENDING-rejected",
+    ("B-halt-CC_PENDING-rejected",
      "CC_PENDING", {"shares": 100, "pending_order_status": "rejected"},
-     "CC_PENDING->HOLDING (reject_or_cancel)", "HOLDING", "transition"),
+     "HALT:CC_PENDING order status 'rejected' requires review",
+     "CC_PENDING", "halt"),
     ("B-tr-CC_OPEN-called_away",
      "CC_OPEN", {"shares": 0, "call_open": False},
      "CC_OPEN->FLAT (called_away)", "FLAT", "transition"),
     ("B-tr-CC_OPEN-cc_expired_worthless",
      "CC_OPEN", {"shares": 100, "call_open": False},
      "CC_OPEN->HOLDING (cc_expired_worthless)", "HOLDING", "transition"),
-    ("B-tr-CC_PENDING-call_open-path",
+    ("B-halt-CC_PENDING-call_open-none-status",
      "CC_PENDING",
      {"shares": 100, "call_open": True, "pending_order_status": None},
-     "CC_PENDING->CC_OPEN (fill)", "CC_OPEN", "transition"),
+     "HALT:CC_PENDING unknown pending_order_status None",
+     "CC_PENDING", "halt"),
 
     # -- NOOPS ------------------------------------------------------------
     ("B-noop-FLAT-stable",
@@ -174,9 +177,10 @@ FAMILY_B = [
     ("B-noop-CSP_PENDING-new",
      "CSP_PENDING", {"shares": 0, "pending_order_status": "new"},
      "noop:CSP_PENDING awaiting fill", "CSP_PENDING", "noop"),
-    ("B-noop-CSP_PENDING-none-status",
+    ("B-halt-CSP_PENDING-none-status",
      "CSP_PENDING", {"shares": 0, "pending_order_status": None},
-     "noop:CSP_PENDING awaiting fill", "CSP_PENDING", "noop"),
+     "HALT:CSP_PENDING unknown pending_order_status None",
+     "CSP_PENDING", "halt"),
     ("B-noop-CSP_OPEN-stable",
      "CSP_OPEN", {"shares": 0, "put_open": True},
      "noop:CSP_OPEN stable", "CSP_OPEN", "noop"),
@@ -341,25 +345,227 @@ def run_family_b(failures):
     return passed
 
 
+# --------------------------------------------------------------------------- #
+# Brief 13a.1 - order status map, precedence, sentinels, client_order_id      #
+# --------------------------------------------------------------------------- #
+# All expectations are literals written here; ORDER_STATUS_CLASS is never used
+# to build them.
+
+SDK_CLASS = {
+    "filled": "FILLED",
+    "new": "LIVE", "accepted": "LIVE", "pending_new": "LIVE",
+    "accepted_for_bidding": "LIVE", "pending_cancel": "LIVE",
+    "done_for_day": "LIVE", "stopped": "LIVE", "calculated": "LIVE",
+    "canceled": "DEAD", "expired": "DEAD",
+    "rejected": "HALT", "partially_filled": "HALT", "replaced": "HALT",
+    "pending_replace": "HALT", "suspended": "HALT", "held": "HALT",
+    "pending_review": "HALT",
+}
+
+# status -> (CSP_PENDING action, stage, CC_PENDING action, stage)
+_REV = "requires review"
+MATRIX = {
+    "filled": ("CSP_PENDING->CSP_OPEN (fill)", "CSP_OPEN",
+               "CC_PENDING->CC_OPEN (fill)", "CC_OPEN"),
+    "canceled": ("CSP_PENDING->FLAT (cancel_or_expire)", "FLAT",
+                 "CC_PENDING->HOLDING (cancel_or_expire)", "HOLDING"),
+    "expired": ("CSP_PENDING->FLAT (cancel_or_expire)", "FLAT",
+                "CC_PENDING->HOLDING (cancel_or_expire)", "HOLDING"),
+}
+for _st in ("new", "accepted", "pending_new", "accepted_for_bidding",
+            "pending_cancel", "done_for_day", "stopped", "calculated"):
+    MATRIX[_st] = ("noop:CSP_PENDING awaiting fill", "CSP_PENDING",
+                   "noop:CC_PENDING awaiting fill", "CC_PENDING")
+for _st in ("rejected", "partially_filled", "replaced", "pending_replace",
+            "suspended", "held", "pending_review"):
+    MATRIX[_st] = (f"HALT:CSP_PENDING order status {_st!r} requires review",
+                   "CSP_PENDING",
+                   f"HALT:CC_PENDING order status {_st!r} requires review",
+                   "CC_PENDING")
+
+# (label, stage, snapshot, expected_action, expected_stage)
+PRECEDENCE = [
+    ("canceled+put_open", "CSP_PENDING",
+     {"shares": 0, "put_open": True, "pending_order_status": "canceled"},
+     "HALT:CSP_PENDING order canceled but broker shows shares=0 "
+     "put_open=True", "CSP_PENDING"),
+    ("expired+call_open", "CC_PENDING",
+     {"shares": 100, "call_open": True, "pending_order_status": "expired"},
+     "HALT:CC_PENDING order expired but broker shows shares=100 "
+     "call_open=True", "CC_PENDING"),
+    ("new+put_open", "CSP_PENDING",
+     {"shares": 0, "put_open": True, "pending_order_status": "new"},
+     "CSP_PENDING->CSP_OPEN (fill)", "CSP_OPEN"),
+    ("filled+put_open_false", "CSP_PENDING",
+     {"shares": 0, "put_open": False, "pending_order_status": "filled"},
+     "CSP_PENDING->CSP_OPEN (fill)", "CSP_OPEN"),
+]
+
+SENTINELS = [
+    ("not_found", "CSP_PENDING", 0,
+     "HALT:CSP_PENDING tracked order not_found at broker"),
+    ("not_found", "CC_PENDING", 100,
+     "HALT:CC_PENDING tracked order not_found at broker"),
+    (None, "CSP_PENDING", 0,
+     "HALT:CSP_PENDING unknown pending_order_status None"),
+    (None, "CC_PENDING", 100,
+     "HALT:CC_PENDING unknown pending_order_status None"),
+    ("", "CSP_PENDING", 0,
+     "HALT:CSP_PENDING unknown pending_order_status ''"),
+    ("", "CC_PENDING", 100,
+     "HALT:CC_PENDING unknown pending_order_status ''"),
+]
+
+# (label, stage, trigger, expected_to_stage)
+PENDING_EXITS = [
+    ("CSP_PENDING-fill", "CSP_PENDING", "fill", "CSP_OPEN"),
+    ("CSP_PENDING-cancel_or_expire", "CSP_PENDING", "cancel_or_expire", "FLAT"),
+    ("CC_PENDING-fill", "CC_PENDING", "fill", "CC_OPEN"),
+    ("CC_PENDING-cancel_or_expire", "CC_PENDING", "cancel_or_expire", "HOLDING"),
+]
+
+
+def run_13a1(failures):
+    passed = 0
+
+    # a. SDK coverage (alpaca-py is only required here)
+    try:
+        from alpaca.trading.enums import OrderStatus
+        sdk = {s.value for s in OrderStatus}
+        passed += _check(
+            failures, set(fs.ORDER_STATUS_CLASS) == sdk,
+            f"13a-a: map keys != SDK OrderStatus: "
+            f"missing {sorted(sdk - set(fs.ORDER_STATUS_CLASS))} "
+            f"extra {sorted(set(fs.ORDER_STATUS_CLASS) - sdk)}")
+    except ImportError:
+        failures.append("13a-a: alpaca-py not importable (use .venv python)")
+
+    # b. exact class per value
+    passed += _check(failures, len(SDK_CLASS) == 18, "13b: literal not 18")
+    passed += _check(
+        failures, fs.ORDER_STATUS_CLASS == SDK_CLASS,
+        "13b: ORDER_STATUS_CLASS differs from literal")
+    for st, cls in SDK_CLASS.items():
+        got = fs.classify_order_status(st)
+        passed += _check(failures, got == cls,
+                         f"13b: classify({st!r}) expected {cls} got {got}")
+    for st in (None, "", "not_found", "pending", "cancelled", "weird", 5):
+        got = fs.classify_order_status(st)
+        passed += _check(failures, got == "HALT",
+                         f"13b: classify({st!r}) expected HALT got {got}")
+
+    # c. matrix
+    passed += _check(failures, set(MATRIX) == set(SDK_CLASS),
+                     "13c: matrix does not cover all 18 statuses")
+    for st, (a1, g1, a2, g2) in MATRIX.items():
+        for stage, snap, exp_a, exp_g in (
+            ("CSP_PENDING", {"shares": 0, "put_open": False}, a1, g1),
+            ("CC_PENDING", {"shares": 100, "call_open": False}, a2, g2),
+        ):
+            state = _state_at(stage)
+            snap = dict(snap, pending_order_status=st)
+            new_state, action = fs.reconcile(state, snap)
+            passed += _check(
+                failures, action == exp_a,
+                f"13c-{stage}-{st}: action expected {exp_a!r} got {action!r}")
+            passed += _check(
+                failures, new_state["wheel"]["stage"] == exp_g,
+                f"13c-{stage}-{st}: stage expected {exp_g!r} got "
+                f"{new_state['wheel']['stage']!r}")
+
+    # d. precedence
+    for label, stage, snap, exp_a, exp_g in PRECEDENCE:
+        state = _state_at(stage)
+        new_state, action = fs.reconcile(state, snap)
+        passed += _check(
+            failures, action == exp_a,
+            f"13d-{label}: action expected {exp_a!r} got {action!r}")
+        passed += _check(
+            failures, new_state["wheel"]["stage"] == exp_g,
+            f"13d-{label}: stage expected {exp_g!r} got "
+            f"{new_state['wheel']['stage']!r}")
+
+    # e. sentinels
+    for status, stage, shares, exp_a in SENTINELS:
+        state = _state_at(stage)
+        new_state, action = fs.reconcile(
+            state, {"shares": shares, "pending_order_status": status})
+        passed += _check(
+            failures, action == exp_a,
+            f"13e-{stage}-{status!r}: expected {exp_a!r} got {action!r}")
+        passed += _check(
+            failures, new_state is state and
+            state["wheel"]["stage"] == stage,
+            f"13e-{stage}-{status!r}: HALT must not mutate/copy state")
+
+    # f. client_order_id clearing
+    for label, stage, trigger, exp_to in PENDING_EXITS:
+        state = _state_at(stage)
+        state["wheel"]["client_order_id"] = "coid-123"
+        new_state, action = fs.apply_trigger(state, trigger)
+        passed += _check(
+            failures, new_state["wheel"]["stage"] == exp_to,
+            f"13f-{label}: stage expected {exp_to!r} got "
+            f"{new_state['wheel']['stage']!r}")
+        passed += _check(
+            failures, new_state["wheel"]["client_order_id"] is None,
+            f"13f-{label}: client_order_id not cleared in new_state: "
+            f"{new_state['wheel']['client_order_id']!r}")
+        passed += _check(
+            failures, state["wheel"]["client_order_id"] == "coid-123"
+            and state["wheel"]["stage"] == stage,
+            f"13f-{label}: input state was mutated")
+    state = _state_at("CSP_OPEN")
+    state["wheel"]["client_order_id"] = "coid-123"
+    new_state, action = fs.apply_trigger(state, "assigned")
+    passed += _check(
+        failures, action == "CSP_OPEN->HOLDING (assigned)"
+        and new_state["wheel"]["client_order_id"] == "coid-123",
+        f"13f-non-pending: coid not preserved ({action!r})")
+
+    # g. residual fail-closed branch: a class with no explicit match HALTs
+    for stage, shares in (("CSP_PENDING", 0), ("CC_PENDING", 100)):
+        exp = (f"HALT:{stage} unclassifiable order status 'canceled' "
+               f"class 'BOGUS'")
+        orig = fs.ORDER_STATUS_CLASS["canceled"]
+        fs.ORDER_STATUS_CLASS["canceled"] = "BOGUS"
+        try:
+            state = _state_at(stage)
+            new_state, action = fs.reconcile(
+                state, {"shares": shares, "pending_order_status": "canceled"})
+        finally:
+            fs.ORDER_STATUS_CLASS["canceled"] = orig
+        passed += _check(failures, action == exp,
+                         f"13g-{stage}: expected {exp!r} got {action!r}")
+        passed += _check(
+            failures, new_state is state and state["wheel"]["stage"] == stage,
+            f"13g-{stage}: residual HALT must return input, stage unchanged")
+        passed += _check(
+            failures, fs.ORDER_STATUS_CLASS["canceled"] == "DEAD",
+            f"13g-{stage}: ORDER_STATUS_CLASS not restored")
+    return passed
+
+
 def main(argv):
     failures = []
     passed = 0
     passed += run_family_a(failures)
     passed += run_family_b(failures)
+    passed += run_13a1(failures)
 
-    total_fixtures = len(FAMILY_A) + len(FAMILY_B)
+    n_a, n_b = len(FAMILY_A), len(FAMILY_B)
     total_asserts = passed + len(failures)
 
     if failures:
         print("FAIL")
         for f in failures:
             print("  " + f)
-        print(f"{total_fixtures} fixtures, {total_asserts} assertions, "
-              f"{passed} passed, {len(failures)} failed")
+        print(f"{n_a} apply_trigger fixtures, {n_b} reconcile fixtures, "
+              f"{total_asserts} assertions, {passed} passed, "
+              f"{len(failures)} failed")
         return 1
 
-    print(f"PASS: {total_fixtures} fixtures "
-          f"({len(FAMILY_A)} apply_trigger + {len(FAMILY_B)} reconcile), "
+    print(f"PASS: {n_a} apply_trigger fixtures, {n_b} reconcile fixtures, "
           f"{total_asserts} assertions")
     return 0
 

@@ -56,28 +56,46 @@ STAGES = [FLAT, CSP_PENDING, CSP_OPEN, HOLDING, CC_PENDING, CC_OPEN]
 LEGAL_TRANSITIONS = {
     (FLAT, "submit_csp"): CSP_PENDING,
     (CSP_PENDING, "fill"): CSP_OPEN,
-    (CSP_PENDING, "reject_or_cancel"): FLAT,
+    (CSP_PENDING, "cancel_or_expire"): FLAT,
     (CSP_OPEN, "assigned"): HOLDING,            # put gone AND shares present
     (CSP_OPEN, "expired_worthless"): FLAT,      # put gone AND no shares
     (HOLDING, "submit_cc"): CC_PENDING,
     (CC_PENDING, "fill"): CC_OPEN,
-    (CC_PENDING, "reject_or_cancel"): HOLDING,
+    (CC_PENDING, "cancel_or_expire"): HOLDING,
     (CC_OPEN, "called_away"): FLAT,             # shares gone AND call gone
     (CC_OPEN, "cc_expired_worthless"): HOLDING, # shares present, call gone
 }
 
-# Order statuses that mean "still in flight, do nothing yet".
-_ORDER_LIVE = frozenset(
-    {None, "", "pending", "pending_new", "new", "accepted", "held",
-     "accepted_for_bidding", "partially_filled", "pending_replace",
-     "replaced", "calculated"}
-)
-# Order statuses that mean "this order is dead, no fill".
-_ORDER_DEAD = frozenset(
-    {"canceled", "cancelled", "rejected", "expired", "done_for_day",
-     "pending_cancel", "stopped", "suspended"}
-)
-_ORDER_FILLED = frozenset({"filled"})
+# Classification of every alpaca-py 0.43.5 OrderStatus value. Anything not a
+# key here (None, "", "not_found", unknown strings) classifies as HALT.
+ORDER_STATUS_CLASS = {
+    "filled": "FILLED",
+    "new": "LIVE",
+    "accepted": "LIVE",
+    "pending_new": "LIVE",
+    "accepted_for_bidding": "LIVE",
+    "pending_cancel": "LIVE",
+    "done_for_day": "LIVE",
+    "stopped": "LIVE",
+    "calculated": "LIVE",
+    "canceled": "DEAD",
+    "expired": "DEAD",
+    "rejected": "HALT",
+    "partially_filled": "HALT",
+    "replaced": "HALT",
+    "pending_replace": "HALT",
+    "suspended": "HALT",
+    "held": "HALT",
+    "pending_review": "HALT",
+}
+
+
+def classify_order_status(status):
+    """Pure. "FILLED" | "LIVE" | "DEAD" | "HALT". Unmapped input -> "HALT"."""
+    if not isinstance(status, str):
+        return "HALT"
+    return ORDER_STATUS_CLASS.get(status, "HALT")
+
 
 # A share lot for the wheel is exactly one round lot.
 LOT = 100
@@ -97,6 +115,9 @@ def apply_trigger(state, trigger):
     to_stage = LEGAL_TRANSITIONS[key]
     new_state = copy.deepcopy(state)
     new_state["wheel"]["stage"] = to_stage
+    if stage in (CSP_PENDING, CC_PENDING):
+        # fresh_flat_state() carries no client_order_id, i.e. absent == None.
+        new_state["wheel"]["client_order_id"] = None
     return new_state, f"{stage}->{to_stage} ({trigger})"
 
 
@@ -144,20 +165,32 @@ def reconcile(state, broker_snapshot):
         )
 
     if stage == CSP_PENDING:
-        if order_status in _ORDER_FILLED or put_open:
+        cls = classify_order_status(order_status)
+        if cls == "HALT":
+            if order_status == "not_found":
+                return state, "HALT:CSP_PENDING tracked order not_found at broker"
+            if order_status in ORDER_STATUS_CLASS:
+                return state, (
+                    f"HALT:CSP_PENDING order status {order_status!r} requires review"
+                )
+            return state, f"HALT:CSP_PENDING unknown pending_order_status {order_status!r}"
+        if cls == "FILLED" or (cls == "LIVE" and put_open):
             if shares != 0:
                 return state, f"HALT:CSP_PENDING filling but broker shows shares={shares}"
             return apply_trigger(state, "fill")
-        if order_status in _ORDER_DEAD:
+        if cls == "LIVE":
+            return state, "noop:CSP_PENDING awaiting fill"
+        if cls == "DEAD":
             if shares != 0 or put_open:
                 return state, (
                     f"HALT:CSP_PENDING order {order_status} but broker shows "
                     f"shares={shares} put_open={put_open}"
                 )
-            return apply_trigger(state, "reject_or_cancel")
-        if order_status in _ORDER_LIVE:
-            return state, "noop:CSP_PENDING awaiting fill"
-        return state, f"HALT:CSP_PENDING unknown pending_order_status {order_status!r}"
+            return apply_trigger(state, "cancel_or_expire")
+        return state, (
+            f"HALT:CSP_PENDING unclassifiable order status {order_status!r} "
+            f"class {cls!r}"
+        )
 
     if stage == CSP_OPEN:
         if put_open:
@@ -183,20 +216,32 @@ def reconcile(state, broker_snapshot):
         )
 
     if stage == CC_PENDING:
-        if order_status in _ORDER_FILLED or call_open:
+        cls = classify_order_status(order_status)
+        if cls == "HALT":
+            if order_status == "not_found":
+                return state, "HALT:CC_PENDING tracked order not_found at broker"
+            if order_status in ORDER_STATUS_CLASS:
+                return state, (
+                    f"HALT:CC_PENDING order status {order_status!r} requires review"
+                )
+            return state, f"HALT:CC_PENDING unknown pending_order_status {order_status!r}"
+        if cls == "FILLED" or (cls == "LIVE" and call_open):
             if shares != LOT:
                 return state, f"HALT:CC_PENDING filling but broker shows shares={shares}"
             return apply_trigger(state, "fill")
-        if order_status in _ORDER_DEAD:
+        if cls == "LIVE":
+            return state, "noop:CC_PENDING awaiting fill"
+        if cls == "DEAD":
             if shares != LOT or call_open:
                 return state, (
                     f"HALT:CC_PENDING order {order_status} but broker shows "
                     f"shares={shares} call_open={call_open}"
                 )
-            return apply_trigger(state, "reject_or_cancel")
-        if order_status in _ORDER_LIVE:
-            return state, "noop:CC_PENDING awaiting fill"
-        return state, f"HALT:CC_PENDING unknown pending_order_status {order_status!r}"
+            return apply_trigger(state, "cancel_or_expire")
+        return state, (
+            f"HALT:CC_PENDING unclassifiable order status {order_status!r} "
+            f"class {cls!r}"
+        )
 
     if stage == CC_OPEN:
         if call_open:
