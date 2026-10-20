@@ -26,7 +26,7 @@ Exit codes (morning-review contract):
   1  uncaught exception (auth / network / corrupt state)
   2  argparse error
   3  init / set-state refused
-  4  HALT (state_missing | snapshot | reconcile)
+  4  HALT (state_missing | clock | snapshot | reconcile | watchlist_structure)
 """
 import argparse
 import sys
@@ -93,7 +93,7 @@ def run(dry_run=True):
         from alpaca.data.historical.option import OptionHistoricalDataClient
         import screener
         import wheel_dryrun
-        from datetime import datetime
+        from watchlist import WatchlistStructureError
         from zoneinfo import ZoneInfo
 
         from credentials import load_credentials
@@ -109,9 +109,19 @@ def run(dry_run=True):
         policy = screener.load_policy()
         screener.init_throttle(policy["runtime"]["rate_limit_per_min"])
 
-        # Mirror wheel_dryrun.main(): DTE / earnings anchor to the US/Eastern
-        # calendar date, not the host's local date.
-        now_et = datetime.now(ZoneInfo("America/New_York"))
+        # One broker clock for the whole run: DTE / earnings / expiry anchor
+        # to the US/Eastern calendar date of the broker's timestamp, never
+        # the host clock.
+        screener.throttle("get_clock")
+        clock = trading_client.get_clock()
+        ts = getattr(clock, "timestamp", None)
+        if ts is None or ts.tzinfo is None or ts.utcoffset() is None:
+            reason = "clock timestamp missing or tz-naive"
+            fs.alert_stub(f"HALT {reason}")
+            fs.record_decision(conn, run_id, stage_from=stage, stage_to=stage,
+                               action=f"HALT:{reason}", detail="")
+            return _halt_exit(conn, run_id, state, f"HALT:{reason}")
+        now_et = ts.astimezone(ZoneInfo("America/New_York"))
         run_date = now_et.date()
 
         # 3. READ broker truth (raises on auth/network failure - let it).
@@ -131,7 +141,8 @@ def run(dry_run=True):
 
         # 5. RECONCILE at any stage (dumps + alerts + journals on HALT itself).
         new_state, action = fs.reconcile_and_handle(
-            state, snapshot, conn=conn, run_id=run_id)
+            state, snapshot, conn=conn, run_id=run_id,
+            as_of_date=run_date)
         if action.startswith("HALT:"):
             return _halt_exit(conn, run_id, new_state, action)
 
@@ -144,9 +155,17 @@ def run(dry_run=True):
         # 7. Scan only on exactly "noop:FLAT stable" (a transition INTO FLAT
         #    this run does not scan; the next run does).
         if action == "noop:FLAT stable":
-            result = wheel_dryrun.scan_watchlist(
-                trading_client, stock_client, option_client, policy,
-                now_et, run_date)
+            try:
+                result = wheel_dryrun.scan_watchlist(
+                    trading_client, stock_client, option_client, policy,
+                    now_et, run_date)
+            except WatchlistStructureError as e:
+                reason = f"watchlist_structure {e}"
+                fs.alert_stub(f"HALT {reason}")
+                fs.record_decision(conn, run_id, stage_from=fs.FLAT,
+                                   stage_to=fs.FLAT, action=f"HALT:{reason}",
+                                   detail="")
+                return _halt_exit(conn, run_id, new_state, f"HALT:{reason}")
             is_open = getattr(result.clock, "is_open", None)
             if result.passing_rows:
                 proposal = result.passing_rows[0]  # already OI-desc sorted

@@ -16,15 +16,22 @@ Scenarios:
   S4 CSP_OPEN put open AND 100 F         -> reconcile HALT (not snapshot)
   S5 CSP_PENDING awaiting fill           -> tracked coid passed to the read
   S6 no state.json                       -> HALT:state_missing, nothing created
+  S7 FLAT, scan raises WatchlistStructureError -> HALT:watchlist_structure
+  S8 tz-naive broker clock               -> HALT:clock, financials never read
+  S9 CSP_OPEN put gone shares 0, clock before expiry (ET) -> reconcile HALT
+  S10 same, clock on expiry (ET)         -> FLAT
+The broker clock is faked on TradingClient.get_clock (Brief 13a.2).
 """
 
 import contextlib
+import datetime
 import hashlib
 import io
 import os
 import sqlite3
 import sys
 import tempfile
+import types
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -32,7 +39,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import credentials
 import forgetrader_state as fs
 import wheel_dryrun
+from alpaca.trading.client import TradingClient
 from forgetrader.run import run
+from watchlist import WatchlistStructureError
 
 _REAL_STATE = Path(fs.STATE_PATH)
 _REAL_JOURNAL = Path(fs.JOURNAL_PATH)
@@ -41,6 +50,8 @@ _REAL_SCANS = Path(fs.SCANS_DIR)
 PUT = "F261120P00012000"
 COID = "cid-test-1"
 SEED = {"equity": 1300.0, "cash": 1300.0, "options_buying_power": 1300.0}
+UTC = datetime.timezone.utc
+CLOCK_DEFAULT = datetime.datetime(2026, 10, 20, 15, 0, tzinfo=UTC)
 CANNED_MONEY = {"equity": 1500.0, "cash": 1400.0, "options_buying_power": 1450.0}
 
 
@@ -70,7 +81,7 @@ def _sha(p):
     return hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else None
 
 
-def _drive(seed_state, financials):
+def _drive(seed_state, financials, clock_ts=CLOCK_DEFAULT, scan=None):
     """Returns a dict of observations. Restores every patch in finally."""
     tmp = Path(tempfile.mkdtemp(prefix="run_stages_"))
     tmp_state, tmp_journal, tmp_scans = tmp / "state.json", tmp / "journal.db", tmp / "scans"
@@ -80,9 +91,10 @@ def _drive(seed_state, financials):
         "journal_connect", "read_broker_financials", "alert_stub")}
     orig_creds = credentials.load_credentials
     orig_scan = wheel_dryrun.scan_watchlist
+    orig_clock = TradingClient.get_clock
     ol, ow, oj = orig["load_state"], orig["write_state"], orig["journal_connect"]
 
-    obs = {"fin_calls": [], "cred_calls": 0, "alerts": [], "scan_called": False,
+    obs = {"fin_calls": [], "cred_calls": 0, "alerts": [], "scan_called": False, "clock_calls": 0,
            "tmp_state": tmp_state, "tmp_scans": tmp_scans}
 
     def fake_fin(trading_client=None, tracked_client_order_id=None):
@@ -97,6 +109,10 @@ def _drive(seed_state, financials):
         obs["scan_called"] = True
         raise AssertionError("scan_watchlist must not be called in this scenario")
 
+    def fake_clock(self):
+        obs["clock_calls"] += 1
+        return types.SimpleNamespace(timestamp=clock_ts, is_open=False)
+
     out, err = io.StringIO(), io.StringIO()
     try:
         fs.STATE_PATH, fs.JOURNAL_PATH, fs.SCANS_DIR = tmp_state, tmp_journal, tmp_scans
@@ -106,7 +122,8 @@ def _drive(seed_state, financials):
         fs.read_broker_financials = fake_fin
         fs.alert_stub = lambda msg: obs["alerts"].append(msg)
         credentials.load_credentials = fake_creds
-        wheel_dryrun.scan_watchlist = fake_scan
+        wheel_dryrun.scan_watchlist = scan or fake_scan
+        TradingClient.get_clock = fake_clock
         if seed_state is not None:
             ow(seed_state, tmp_state)
 
@@ -129,6 +146,7 @@ def _drive(seed_state, financials):
             setattr(fs, k, v)
         credentials.load_credentials = orig_creds
         wheel_dryrun.scan_watchlist = orig_scan
+        TradingClient.get_clock = orig_clock
 
 
 class T:
@@ -223,6 +241,57 @@ def main():
     t.ok(o["cred_calls"] == 0, "S6 load_credentials called")
     t.ok("state_missing" in o["stderr"], "S6 stderr reason missing")
 
+    # S7 -------------------------------------------------------------------
+    def bad_watchlist(*a, **k):
+        raise WatchlistStructureError("bad")
+
+    o = _drive(_state(fs.FLAT), _fin(), scan=bad_watchlist)
+    t.ok(o["ret"] == 4, f"S7 exit {o['ret']!r} != 4")
+    t.ok([d["action"] for d in o["decisions"]] ==
+         ["noop:FLAT stable", "HALT:watchlist_structure bad"],
+         f"S7 decisions {o['decisions']!r}")
+    t.ok(sum(d["action"].startswith("HALT:watchlist_structure")
+             for d in o["decisions"]) == 1, "S7 HALT row count")
+    t.ok(o["runs"] == [{"outcome": "dryrun:HALT:watchlist_structure bad"}],
+         f"S7 runs {o['runs']!r}")
+    t.ok(o["state"]["last_run"]["outcome"] == "dryrun:HALT:watchlist_structure bad",
+         f"S7 last_run {o['state']['last_run']!r}")
+    t.ok(o["alerts"] == ["HALT watchlist_structure bad"], f"S7 alerts {o['alerts']!r}")
+    t.ok(o["state"]["wheel"]["stage"] == fs.FLAT, "S7 stage changed")
+
+    # S8 -------------------------------------------------------------------
+    o = _drive(_state(fs.FLAT), _fin(),
+               clock_ts=datetime.datetime(2026, 10, 20, 15, 0))
+    t.ok(o["ret"] == 4, f"S8 exit {o['ret']!r} != 4")
+    t.ok(len(o["fin_calls"]) == 0, f"S8 financials read: {o['fin_calls']!r}")
+    t.ok(o["clock_calls"] == 1, f"S8 clock calls {o['clock_calls']!r}")
+    t.ok([d["action"] for d in o["decisions"]] ==
+         ["HALT:clock timestamp missing or tz-naive"], f"S8 decisions {o['decisions']!r}")
+    t.ok(o["runs"] == [{"outcome": "dryrun:HALT:clock timestamp missing or tz-naive"}],
+         f"S8 runs {o['runs']!r}")
+    t.ok(len(o["alerts"]) == 1, f"S8 alerts {o['alerts']!r}")
+    t.ok(not o["scan_called"], "S8 scan called")
+
+    # S9 / S10: ET conversion decides the expiry date (expiry 2026-11-20) --
+    PUT_E = "F261120P00012000"
+    o = _drive(_state(fs.CSP_OPEN, PUT_E, COID), _fin(),
+               clock_ts=datetime.datetime(2026, 11, 20, 3, 0, tzinfo=UTC))
+    t.ok(o["ret"] == 4, f"S9 exit {o['ret']!r} != 4")
+    t.ok([d["action"] for d in o["decisions"]] ==
+         ["HALT:CSP_OPEN contract gone before expiry 2026-11-20 (as_of 2026-11-19)"],
+         f"S9 decisions {o['decisions']!r}")
+    t.ok(o["state"]["wheel"]["stage"] == fs.CSP_OPEN, "S9 stage changed")
+    t.ok(len(o["alerts"]) == 1, f"S9 alerts {o['alerts']!r}")
+
+    o = _drive(_state(fs.CSP_OPEN, PUT_E, COID), _fin(),
+               clock_ts=datetime.datetime(2026, 11, 21, 3, 0, tzinfo=UTC))
+    t.ok(o["ret"] == 0, f"S10 exit {o['ret']!r} != 0")
+    t.ok(o["state"]["wheel"]["stage"] == fs.FLAT, "S10 stage not FLAT")
+    t.ok([d["action"] for d in o["decisions"]] ==
+         ["CSP_OPEN->FLAT (expired_worthless)"], f"S10 decisions {o['decisions']!r}")
+    t.ok(o["state"]["wheel"]["contract_symbol"] is None, "S10 wheel not reset")
+    t.ok(not o["scan_called"], "S10 scan called")
+
     # ISOLATION ------------------------------------------------------------
     after = (_sha(_REAL_STATE), _sha(_REAL_JOURNAL),
              sorted(os.listdir(_REAL_SCANS)) if _REAL_SCANS.exists() else None)
@@ -236,7 +305,7 @@ def main():
         for f in t.failures:
             print("  " + f)
         return 1
-    print(f"PASS: 6 scenarios + 1 isolation guard, {t.n} assertions")
+    print(f"PASS: 10 scenarios + 1 isolation guard, {t.n} assertions")
     return 0
 
 

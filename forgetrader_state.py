@@ -29,7 +29,7 @@ import os
 import sqlite3
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -101,6 +101,39 @@ def classify_order_status(status):
 LOT = 100
 
 
+def _contract_expiry(contract):
+    """Pure. Expiry date of an OCC option symbol (root + YYMMDD + C/P + 8
+    strike digits), or None if it does not parse. Never raises."""
+    if not isinstance(contract, str) or len(contract) < 16:
+        return None
+    if not contract[-8:].isdigit() or contract[-9] not in ("C", "P"):
+        return None
+    ymd = contract[-15:-9]
+    if not ymd.isdigit():
+        return None
+    try:
+        return date(2000 + int(ymd[:2]), int(ymd[2:4]), int(ymd[4:6]))
+    except ValueError:
+        return None
+
+
+def _expiry_guard(stage, contract, as_of_date, right):
+    """Pure. HALT string if the contract's disappearance cannot be read as an
+    expiry, else None. Fail closed when as_of_date is absent or not a date."""
+    if not isinstance(as_of_date, date) or isinstance(as_of_date, datetime):
+        return f"HALT:{stage} expiry check needs as_of_date"
+    expiry = _contract_expiry(contract)
+    if expiry is None:
+        return f"HALT:{stage} cannot parse expiry from contract_symbol {contract!r}"
+    if contract[-9] != right:
+        return (f"HALT:{stage} contract_symbol {contract!r} right does not "
+                f"match stage")
+    if as_of_date < expiry:
+        return (f"HALT:{stage} contract gone before expiry {expiry} "
+                f"(as_of {as_of_date})")
+    return None
+
+
 def apply_trigger(state, trigger):
     """Pure. Apply `trigger` to the current stage via LEGAL_TRANSITIONS.
 
@@ -115,13 +148,20 @@ def apply_trigger(state, trigger):
     to_stage = LEGAL_TRANSITIONS[key]
     new_state = copy.deepcopy(state)
     new_state["wheel"]["stage"] = to_stage
+    fresh_wheel = fresh_flat_state()["wheel"]
     if stage in (CSP_PENDING, CC_PENDING):
-        # fresh_flat_state() carries no client_order_id, i.e. absent == None.
-        new_state["wheel"]["client_order_id"] = None
+        new_state["wheel"]["client_order_id"] = fresh_wheel["client_order_id"]
+    if to_stage == FLAT:
+        new_state["wheel"] = fresh_wheel
+    elif to_stage == HOLDING:
+        fresh_wheel["ticker"] = new_state["wheel"].get("ticker")
+        fresh_wheel["cost_basis"] = new_state["wheel"].get("cost_basis")
+        fresh_wheel["stage"] = HOLDING
+        new_state["wheel"] = fresh_wheel
     return new_state, f"{stage}->{to_stage} ({trigger})"
 
 
-def reconcile(state, broker_snapshot):
+def reconcile(state, broker_snapshot, as_of_date=None):
     """Pure function. No I/O, no SDK calls.
 
     Inputs
@@ -139,6 +179,9 @@ def reconcile(state, broker_snapshot):
       * any (stage, broker_reality) that matches no legal transition
                                           -> unchanged state + "HALT:<reason>"
         (stage is NEVER mutated on HALT).
+
+    as_of_date (datetime.date, the broker-clock ET date) guards the two
+    expiry transitions; None fails closed there.
 
     Critical rule: at CSP_OPEN with the put absent, the choice between HOLDING
     and FLAT is made by INSPECTING broker_snapshot["shares"] - never inferred
@@ -201,6 +244,10 @@ def reconcile(state, broker_snapshot):
         if shares == LOT:
             return apply_trigger(state, "assigned")
         if shares == 0:
+            halt = _expiry_guard(stage, state["wheel"].get("contract_symbol"),
+                                 as_of_date, "P")
+            if halt:
+                return state, halt
             return apply_trigger(state, "expired_worthless")
         return state, (
             f"HALT:CSP_OPEN put gone and shares={shares} is neither a {LOT}-share "
@@ -252,6 +299,10 @@ def reconcile(state, broker_snapshot):
         if shares == 0:
             return apply_trigger(state, "called_away")
         if shares == LOT:
+            halt = _expiry_guard(stage, state["wheel"].get("contract_symbol"),
+                                 as_of_date, "C")
+            if halt:
+                return state, halt
             return apply_trigger(state, "cc_expired_worthless")
         return state, (
             f"HALT:CC_OPEN call gone and shares={shares} is neither flat (called "
@@ -328,6 +379,7 @@ def fresh_flat_state(equity=0.0, cash=0.0, options_buying_power=None,
             "strike": None,
             "expiry": None,
             "opened_at": None,
+            "client_order_id": None,
         },
         "positions": list(positions) if positions else [],
         "open_orders": list(open_orders) if open_orders else [],
@@ -475,12 +527,13 @@ def dump_halt(broker_snapshot, state, reason):
     return path
 
 
-def reconcile_and_handle(state, broker_snapshot, conn=None, run_id=None):
+def reconcile_and_handle(state, broker_snapshot, conn=None, run_id=None,
+                         as_of_date=None):
     """Non-pure wrapper around reconcile(): on a HALT action it writes the
     diagnostic dump and fires alert_stub; on any action it journals a decision
     row when a connection + run_id are supplied. Returns (new_state, action)."""
     stage_from = state["wheel"]["stage"]
-    new_state, action = reconcile(state, broker_snapshot)
+    new_state, action = reconcile(state, broker_snapshot, as_of_date)
     if action.startswith("HALT:"):
         reason = action[len("HALT:"):]
         path = dump_halt(broker_snapshot, state, reason)

@@ -55,6 +55,7 @@ failure, sys.exit(0) when all pass. No pytest.
 """
 
 import contextlib
+import datetime
 import io
 import os
 import sqlite3
@@ -179,6 +180,8 @@ def _drive():
     }
     orig_load_credentials = credentials.load_credentials
     orig_scan_watchlist = wheel_dryrun.scan_watchlist
+    from alpaca.trading.client import TradingClient
+    orig_get_clock = TradingClient.get_clock
 
     _orig_load_state = orig["load_state"]
     _orig_write_state = orig["write_state"]
@@ -213,11 +216,16 @@ def _drive():
                 dict(CANNED_FLAT_FINANCIALS)
         )
         fs.reconcile_and_handle = (
-            lambda state, snap, conn=None, run_id=None: (
+            lambda state, snap, conn=None, run_id=None, as_of_date=None: (
                 fs.fresh_flat_state(), "noop:FLAT stable"
             )
         )
         wheel_dryrun.scan_watchlist = lambda *a, **k: _synthetic_scan_result()
+        # 13a.2: run() reads the broker clock first; fake it (no network).
+        TradingClient.get_clock = lambda self: type("C", (), {
+            "timestamp": datetime.datetime(
+                2026, 10, 20, 15, 0, tzinfo=datetime.timezone.utc),
+            "is_open": False})()
 
         with contextlib.redirect_stdout(buf):
             ret = run(dry_run=True)
@@ -239,6 +247,7 @@ def _drive():
         fs.reconcile_and_handle = orig["reconcile_and_handle"]
         credentials.load_credentials = orig_load_credentials
         wheel_dryrun.scan_watchlist = orig_scan_watchlist
+        TradingClient.get_clock = orig_get_clock
 
 
 # --------------------------------------------------------------------------- #

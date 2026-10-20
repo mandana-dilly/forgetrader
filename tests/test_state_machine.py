@@ -24,6 +24,7 @@ installed), fixture lists, a loop, a per-assertion failure message, a
 pass/fail counter, sys.exit(1) on any failure, sys.exit(0) clean.
 """
 
+import datetime
 import os
 import sys
 
@@ -283,6 +284,11 @@ def _check(failures, cond, msg):
     return 0
 
 
+B_CONTRACT = {"CSP_OPEN": "NOK261120P00004000",
+              "CC_OPEN": "NOK261120C00005000"}
+B_AS_OF = datetime.date(2026, 11, 20)
+
+
 def run_family_a(failures):
     passed = 0
     for label, from_stage, trigger, exp_action, exp_to, legal in FAMILY_A:
@@ -318,7 +324,10 @@ def run_family_b(failures):
     passed = 0
     for label, stage, snapshot, exp_action, exp_stage, kind in FAMILY_B:
         state = _state_at(stage)
-        new_state, action = fs.reconcile(state, snapshot)
+        # 13a.2: the two expiry fixtures need a parseable contract + a date.
+        if stage in B_CONTRACT:
+            state["wheel"]["contract_symbol"] = B_CONTRACT[stage]
+        new_state, action = fs.reconcile(state, snapshot, B_AS_OF)
 
         passed += _check(
             failures, action == exp_action,
@@ -515,11 +524,11 @@ def run_13a1(failures):
             failures, state["wheel"]["client_order_id"] == "coid-123"
             and state["wheel"]["stage"] == stage,
             f"13f-{label}: input state was mutated")
-    state = _state_at("CSP_OPEN")
+    state = _state_at("HOLDING")
     state["wheel"]["client_order_id"] = "coid-123"
-    new_state, action = fs.apply_trigger(state, "assigned")
+    new_state, action = fs.apply_trigger(state, "submit_cc")
     passed += _check(
-        failures, action == "CSP_OPEN->HOLDING (assigned)"
+        failures, action == "HOLDING->CC_PENDING (submit_cc)"
         and new_state["wheel"]["client_order_id"] == "coid-123",
         f"13f-non-pending: coid not preserved ({action!r})")
 
@@ -546,12 +555,159 @@ def run_13a1(failures):
     return passed
 
 
+# --------------------------------------------------------------------------- #
+# Brief 13a.2 - expiry guard, key reset                                       #
+# --------------------------------------------------------------------------- #
+
+PUT_C = "NOK261120P00004000"
+CALL_C = "NOK261120C00005000"
+D = datetime.date
+DT = datetime.datetime
+
+EXPIRY_PARSE = [
+    ("valid P", PUT_C, D(2026, 11, 20)),
+    ("valid C", CALL_C, D(2026, 11, 20)),
+    ("None", None, None),
+    ("short", "NOK2611P0", None),
+    ("bad right", "NOK261120X00004000", None),
+    ("non-digit strike", "NOK261120P0000400X", None),
+    ("impossible date", "NOK261399P00004000", None),
+    ("non-str", 12345, None),
+]
+
+
+def _expiry_cases(stage, ok_contract, wrong_contract, shares, trigger_action):
+    """(label, contract, as_of, expected_action, expected_stage)"""
+    q = repr
+    flat = {"CSP_OPEN": "FLAT", "CC_OPEN": "HOLDING"}[stage]
+    return [
+        ("day-before", ok_contract, D(2026, 11, 19),
+         f"HALT:{stage} contract gone before expiry 2026-11-20 "
+         f"(as_of 2026-11-19)", stage),
+        ("on-expiry", ok_contract, D(2026, 11, 20), trigger_action, flat),
+        ("after-expiry", ok_contract, D(2026, 11, 23), trigger_action, flat),
+        ("as_of-None", ok_contract, None,
+         f"HALT:{stage} expiry check needs as_of_date", stage),
+        ("as_of-datetime", ok_contract, DT(2026, 11, 20, 12, 0),
+         f"HALT:{stage} expiry check needs as_of_date", stage),
+        ("contract-None", None, D(2026, 11, 20),
+         f"HALT:{stage} cannot parse expiry from contract_symbol None", stage),
+        ("wrong-right", wrong_contract, D(2026, 11, 20),
+         f"HALT:{stage} contract_symbol {q(wrong_contract)} right does not "
+         f"match stage", stage),
+    ]
+
+
+def run_13a2(failures):
+    passed = 0
+
+    for label, contract, exp in EXPIRY_PARSE:
+        got = fs._contract_expiry(contract)
+        passed += _check(failures, got == exp,
+                         f"13a2-expiry-{label}: expected {exp!r} got {got!r}")
+
+    for stage, ok_c, bad_c, shares, trig in (
+        ("CSP_OPEN", PUT_C, CALL_C, 0, "CSP_OPEN->FLAT (expired_worthless)"),
+        ("CC_OPEN", CALL_C, PUT_C, 100,
+         "CC_OPEN->HOLDING (cc_expired_worthless)"),
+    ):
+        snap_key = "put_open" if stage == "CSP_OPEN" else "call_open"
+        for label, contract, as_of, exp_a, exp_g in _expiry_cases(
+                stage, ok_c, bad_c, shares, trig):
+            state = _state_at(stage)
+            state["wheel"]["contract_symbol"] = contract
+            if as_of is None:
+                new_state, action = fs.reconcile(
+                    state, {"shares": shares, snap_key: False})
+            else:
+                new_state, action = fs.reconcile(
+                    state, {"shares": shares, snap_key: False}, as_of)
+            passed += _check(
+                failures, action == exp_a,
+                f"13a2-{stage}-{label}: expected {exp_a!r} got {action!r}")
+            passed += _check(
+                failures, new_state["wheel"]["stage"] == exp_g,
+                f"13a2-{stage}-{label}: stage expected {exp_g!r} got "
+                f"{new_state['wheel']['stage']!r}")
+            passed += _check(
+                failures, state["wheel"]["stage"] == stage,
+                f"13a2-{stage}-{label}: input stage mutated")
+            if exp_a.startswith("HALT:"):
+                passed += _check(
+                    failures, new_state is state,
+                    f"13a2-{stage}-{label}: HALT must return the input")
+
+    # assigned / called_away are not guarded: no date needed
+    state = _state_at("CSP_OPEN")
+    state["wheel"]["contract_symbol"] = PUT_C
+    ns, a = fs.reconcile(state, {"shares": 100, "put_open": False})
+    passed += _check(failures, a == "CSP_OPEN->HOLDING (assigned)",
+                     f"13a2-assigned-no-date: {a!r}")
+    state = _state_at("CC_OPEN")
+    state["wheel"]["contract_symbol"] = CALL_C
+    ns, a = fs.reconcile(state, {"shares": 0, "call_open": False})
+    passed += _check(failures, a == "CC_OPEN->FLAT (called_away)",
+                     f"13a2-called_away-no-date: {a!r}")
+
+    # fresh wheel key set
+    keys = set(fs.fresh_flat_state()["wheel"])
+    lit = {"stage", "ticker", "cost_basis", "intent", "contract_symbol",
+           "strike", "expiry", "opened_at", "client_order_id"}
+    passed += _check(failures, keys == lit,
+                     f"13a2-fresh-keys: {sorted(keys ^ lit)}")
+
+    # key reset
+    FRESH_FLAT = {"stage": "FLAT", "ticker": None, "cost_basis": None,
+                  "intent": None, "contract_symbol": None, "strike": None,
+                  "expiry": None, "opened_at": None, "client_order_id": None}
+    SEEDED = {"stage": None, "ticker": "NOK", "cost_basis": 4.0,
+              "intent": "wheel", "contract_symbol": PUT_C, "strike": 4.0,
+              "expiry": "2026-11-20", "opened_at": "2026-10-01",
+              "client_order_id": "coid-9"}
+
+    def seeded(stage):
+        st = _state_at(stage)
+        st["wheel"] = dict(SEEDED, stage=stage)
+        return st
+
+    for frm, trig in (("CSP_OPEN", "expired_worthless"),
+                      ("CSP_PENDING", "cancel_or_expire"),
+                      ("CC_OPEN", "called_away")):
+        st = seeded(frm)
+        ns, a = fs.apply_trigger(st, trig)
+        passed += _check(failures, ns["wheel"] == FRESH_FLAT,
+                         f"13a2-reset-FLAT-{frm}: {ns['wheel']!r}")
+        passed += _check(failures, st["wheel"] == dict(SEEDED, stage=frm),
+                         f"13a2-reset-FLAT-{frm}: input mutated")
+    HOLD = dict(FRESH_FLAT, stage="HOLDING", ticker="NOK", cost_basis=4.0)
+    for frm, trig in (("CSP_OPEN", "assigned"),
+                      ("CC_PENDING", "cancel_or_expire"),
+                      ("CC_OPEN", "cc_expired_worthless")):
+        st = seeded(frm)
+        ns, a = fs.apply_trigger(st, trig)
+        passed += _check(failures, ns["wheel"] == HOLD,
+                         f"13a2-reset-HOLDING-{frm}: {ns['wheel']!r}")
+        passed += _check(failures, st["wheel"] == dict(SEEDED, stage=frm),
+                         f"13a2-reset-HOLDING-{frm}: input mutated")
+    for frm, trig, to in (("CSP_PENDING", "fill", "CSP_OPEN"),
+                          ("CC_PENDING", "fill", "CC_OPEN")):
+        st = seeded(frm)
+        ns, a = fs.apply_trigger(st, trig)
+        exp = dict(SEEDED, stage=to, client_order_id=None)
+        passed += _check(failures, ns["wheel"] == exp,
+                         f"13a2-keep-{frm}-fill: {ns['wheel']!r}")
+        passed += _check(failures, st["wheel"] == dict(SEEDED, stage=frm),
+                         f"13a2-keep-{frm}-fill: input mutated")
+    return passed
+
+
 def main(argv):
     failures = []
     passed = 0
     passed += run_family_a(failures)
     passed += run_family_b(failures)
     passed += run_13a1(failures)
+    passed += run_13a2(failures)
 
     n_a, n_b = len(FAMILY_A), len(FAMILY_B)
     total_asserts = passed + len(failures)
