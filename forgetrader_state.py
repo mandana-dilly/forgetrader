@@ -401,7 +401,14 @@ def write_state(state, path=STATE_PATH):
     with open(tmp, "w") as f:
         json.dump(state, f, indent=2)
         f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
+    dfd = os.open(str(path.parent), os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
     return path
 
 
@@ -430,7 +437,9 @@ CREATE TABLE IF NOT EXISTS orders (
     side        TEXT NOT NULL,
     qty         INTEGER,
     limit_price REAL,
-    status      TEXT
+    status      TEXT,
+    client_order_id TEXT,
+    broker_order_id TEXT
 );
 CREATE TABLE IF NOT EXISTS events (
     run_id     TEXT NOT NULL,
@@ -447,6 +456,10 @@ def journal_connect(path=JOURNAL_PATH):
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row  # named access only
     conn.executescript(_DDL)
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(orders)")}
+    for col in ("client_order_id", "broker_order_id"):
+        if col not in have:
+            conn.execute(f"ALTER TABLE orders ADD COLUMN {col} TEXT")
     conn.commit()
     return conn
 
@@ -476,13 +489,17 @@ def record_decision(conn, run_id, stage_from, stage_to, action, detail="", ts=No
     conn.commit()
 
 
-def record_order(conn, run_id, symbol, side, qty, limit_price, status, ts=None):
+def record_order(conn, run_id, symbol, side, qty, limit_price, status, ts=None,
+                 client_order_id=None, broker_order_id=None):
     conn.execute(
-        "INSERT INTO orders (run_id, ts, symbol, side, qty, limit_price, status) "
-        "VALUES (:run_id, :ts, :symbol, :side, :qty, :limit_price, :status)",
+        "INSERT INTO orders (run_id, ts, symbol, side, qty, limit_price, status, "
+        "client_order_id, broker_order_id) "
+        "VALUES (:run_id, :ts, :symbol, :side, :qty, :limit_price, :status, "
+        ":client_order_id, :broker_order_id)",
         {
             "run_id": run_id, "ts": ts or _now_iso(), "symbol": symbol,
             "side": side, "qty": qty, "limit_price": limit_price, "status": status,
+            "client_order_id": client_order_id, "broker_order_id": broker_order_id,
         },
     )
     conn.commit()
