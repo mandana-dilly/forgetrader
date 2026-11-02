@@ -4,11 +4,11 @@
     {
       "ticker": "NOK",
       "added": "2026-08-24",
-      "earnings_date": "2026-10-22",
-      "earnings_source": "https://www.nokia.com/about-us/investors/investor-relations-events/",
-      "earnings_stamped": "2026-08-24",
+      "earnings_date": "2027-01-01",
+      "earnings_source": "BOUND (D17): FY Q4 cannot report before 31 Dec 2026; 2027 calendar unpublished. https://www.nokia.com/newsroom/nokia-corporations-financial-calendar-for-2026/",
+      "earnings_stamped": "2026-11-02",
       "own_100_note": "Willing to own 100 shares of NOK at strike if assigned; core telecom infra holding.",
-      "review_by": "2026-11-22"
+      "review_by": "2026-12-03"
     }
   ]
 }
