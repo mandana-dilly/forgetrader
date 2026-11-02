@@ -24,6 +24,7 @@ The broker clock is faked on TradingClient.get_clock (Brief 13a.2).
 """
 
 import contextlib
+from collections import Counter
 import datetime
 import hashlib
 import io
@@ -40,7 +41,7 @@ import credentials
 import forgetrader_state as fs
 import wheel_dryrun
 from alpaca.trading.client import TradingClient
-from forgetrader.run import run
+from forgetrader.run import _proposal_line, run
 from watchlist import WatchlistStructureError
 
 _REAL_STATE = Path(fs.STATE_PATH)
@@ -135,6 +136,8 @@ def _drive(seed_state, financials, clock_ts=CLOCK_DEFAULT, scan=None):
         obs["decisions"] = [dict(r) for r in conn.execute(
             "SELECT stage_from, stage_to, action, detail FROM decisions ORDER BY rowid")]
         obs["runs"] = [dict(r) for r in conn.execute("SELECT outcome FROM runs")]
+        obs["events"] = [dict(r) for r in conn.execute(
+            "SELECT event_type, detail FROM events ORDER BY rowid")]
         conn.close()
         obs["stdout"], obs["stderr"] = out.getvalue(), err.getvalue()
         obs["state"] = ol(tmp_state) if tmp_state.exists() else None
@@ -157,6 +160,16 @@ class T:
         self.n += 1
         if not cond:
             self.failures.append(msg)
+
+
+def _scan_result(wl_rejected, passing_rows=()):
+    return types.SimpleNamespace(
+        passing_rows=list(passing_rows), approved=[], reject_tally=Counter(),
+        wl_rejected=wl_rejected, clock=types.SimpleNamespace(is_open=False))
+
+
+def _wl_events(o):
+    return [e for e in o["events"] if e["event_type"] == "watchlist_rejected"]
 
 
 def _money(state):
@@ -292,6 +305,45 @@ def main():
     t.ok(o["state"]["wheel"]["contract_symbol"] is None, "S10 wheel not reset")
     t.ok(not o["scan_called"], "S10 scan called")
 
+    # T1-T4: wl_rejected visibility + RUN OK line -----------------------------
+    o = _drive(_state(fs.FLAT), _fin(), scan=lambda *a, **k: _scan_result([]))
+    t.ok(o["ret"] == 0, f"T1 exit {o['ret']!r}")
+    t.ok(f"state: {o['tmp_state']}" in o["stdout"], "T1 'state: <path>' missing")
+    t.ok("state->" not in o["stdout"], "T1 'state->' still in stdout")
+    scan_rows = [d for d in o["decisions"] if d["action"] == "all_rejected"]
+    t.ok(len(scan_rows) == 1 and scan_rows[0]["detail"].endswith("wl_rejected=[]"),
+         f"T1 decisions {o['decisions']!r}")
+    t.ok(_wl_events(o) == [], "T1 watchlist_rejected event present")
+    t.ok("WARNING: watchlist_rejected" not in o["stderr"], "T1 stderr warning")
+
+    WL2 = [("XYZ", "earnings_lapsed"), ("ABC", "bad_ticker")]
+    R2 = "[XYZ:earnings_lapsed, ABC:bad_ticker]"
+    o = _drive(_state(fs.FLAT), _fin(), scan=lambda *a, **k: _scan_result(WL2))
+    scan_rows = [d for d in o["decisions"] if d["action"] == "all_rejected"]
+    t.ok(len(scan_rows) == 1, f"T2 scan decision rows {o['decisions']!r}")
+    det = scan_rows[0]["detail"] if scan_rows else ""
+    t.ok(f"  {det}\n" in o["stdout"], "T2 printed detail != journaled detail")
+    t.ok(f"wl_rejected={R2}" in det, f"T2 detail {det!r}")
+    t.ok([e["detail"] for e in _wl_events(o)] == [R2], f"T2 events {o['events']!r}")
+    t.ok(f"WARNING: watchlist_rejected {R2}" in o["stderr"], "T2 stderr warning")
+
+    ROW = {"underlying_symbol": "F", "strike": 12.0,
+           "expiration_date": "2026-11-20", "bid": 0.25, "open_interest": 500,
+           "annualized_yield_pct": 18.0, "collateral": 1200.0}
+    o = _drive(_state(fs.FLAT), _fin(),
+               scan=lambda *a, **k: _scan_result([("XYZ", "earnings_lapsed")], [ROW]))
+    scan_rows = [d for d in o["decisions"] if d["action"] == "propose_csp"]
+    t.ok(len(scan_rows) == 1 and scan_rows[0]["detail"] == _proposal_line(ROW, False),
+         f"T3 decisions {o['decisions']!r}")
+    t.ok([e["detail"] for e in _wl_events(o)] == ["[XYZ:earnings_lapsed]"],
+         f"T3 events {o['events']!r}")
+    t.ok("WARNING: watchlist_rejected [XYZ:earnings_lapsed]" in o["stderr"],
+         "T3 stderr warning")
+
+    order = {"id": "oid-1", "client_order_id": COID, "symbol": PUT, "status": "new"}
+    o = _drive(_state(fs.CSP_PENDING, PUT, COID), _fin(orders=[order], tracked="new"))
+    t.ok(_wl_events(o) == [] and not o["scan_called"], "T4 event on non-FLAT stage")
+
     # ISOLATION ------------------------------------------------------------
     after = (_sha(_REAL_STATE), _sha(_REAL_JOURNAL),
              sorted(os.listdir(_REAL_SCANS)) if _REAL_SCANS.exists() else None)
@@ -305,7 +357,7 @@ def main():
         for f in t.failures:
             print("  " + f)
         return 1
-    print(f"PASS: 10 scenarios + 1 isolation guard, {t.n} assertions")
+    print(f"PASS: 10 scenarios + 4 wl_rejected scenarios + 1 isolation guard, {t.n} assertions")
     return 0
 
 

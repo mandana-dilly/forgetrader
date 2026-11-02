@@ -47,14 +47,22 @@ def _proposal_line(row, is_open):
     )
 
 
-def _all_rejected_line(approved_n, reject_tally, is_open):
+def _render_wl_rejected(wl_rejected):
+    """Render watchlist rejects as "[TICKER:reason, ...]". ONE renderer shared
+    by the all_rejected decision/stdout line, the watchlist_rejected event and
+    the stderr warning, so the three cannot drift."""
+    return "[" + ", ".join(f"{t}:{r}" for t, r in wl_rejected) + "]"
+
+
+def _all_rejected_line(approved_n, reject_tally, is_open, wl_rejected):
     """One deterministic line for an empty scan: how many names were approved,
-    the market-open flag, and the most-common reject tokens - enough for
-    morning-review to tell a genuine all-rejected from a closed-market empty."""
+    the market-open flag, the most-common reject tokens, and the watchlist
+    entries dropped before the scan (wl_rejected) - enough for morning-review
+    to tell a genuine all-rejected from a closed-market empty."""
     top = ", ".join(f"{tok}={cnt}" for tok, cnt in reject_tally.most_common(5))
     return (
         f"all_rejected approved={approved_n} market_open={is_open} "
-        f"top_rejects=[{top}]"
+        f"top_rejects=[{top}] wl_rejected={_render_wl_rejected(wl_rejected)}"
     )
 
 
@@ -174,10 +182,17 @@ def run(dry_run=True):
             else:
                 scan_action = "all_rejected"
                 detail = _all_rejected_line(
-                    len(result.approved), result.reject_tally, is_open)
+                    len(result.approved), result.reject_tally, is_open,
+                    result.wl_rejected)
             # Exactly one decisions row for the scan outcome. No order path.
             fs.record_decision(conn, run_id, stage_from=fs.FLAT,
                                stage_to=fs.FLAT, action=scan_action, detail=detail)
+            if result.wl_rejected:
+                rendered = _render_wl_rejected(result.wl_rejected)
+                fs.record_event(conn, run_id, "watchlist_rejected",
+                                detail=rendered)
+                print(f"WARNING: watchlist_rejected {rendered}",
+                      file=sys.stderr)
             # Compact stdout summary only - no gate trace, no scans/*.txt/*.csv
             # (that stays wheel_dryrun.main()'s job). run.py is a consumer.
             print(f"SCAN {scan_action}")
@@ -196,7 +211,7 @@ def run(dry_run=True):
         fs.record_run(conn, run_id, f"dryrun:{action}")
         fs.record_event(conn, run_id, "dryrun_complete", detail=action)
         print(f"RUN OK  stage={new_state['wheel']['stage']}  action={action}  "
-              f"state->{fs.STATE_PATH}")
+              f"state: {fs.STATE_PATH}")
         return 0
     finally:
         conn.close()
