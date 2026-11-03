@@ -1,8 +1,9 @@
 # Fixture expectations
 
-All fixtures are evaluated against the real system now_et (America/New_York),
-which is 2026-08-24 at the time these fixtures were written. Dates below are
-chosen relative to that fixed point so results are stable.
+These fixtures are evaluated by
+tests/test_watchlist.py at a PINNED now_et of 2026-08-24 12:00 America/New_York.
+Running them by hand via watchlist.py uses the real date and gives wrong results
+since 2026-10-29; that is expected, not a validator bug.
 
 - `fixture_clean.json` - every field valid, earnings_date and review_by both
   in the future. Expect: APPROVED AAPL, exit 0.

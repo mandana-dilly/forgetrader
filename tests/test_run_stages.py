@@ -343,6 +343,8 @@ def main():
     order = {"id": "oid-1", "client_order_id": COID, "symbol": PUT, "status": "new"}
     o = _drive(_state(fs.CSP_PENDING, PUT, COID), _fin(orders=[order], tracked="new"))
     t.ok(_wl_events(o) == [] and not o["scan_called"], "T4 event on non-FLAT stage")
+    t.ok(o["ret"] == 0, f"T4 exit {o['ret']!r}")
+    t.ok(o["state"]["wheel"]["stage"] == fs.CSP_PENDING, "T4 stage changed")
 
     # ISOLATION ------------------------------------------------------------
     after = (_sha(_REAL_STATE), _sha(_REAL_JOURNAL),
