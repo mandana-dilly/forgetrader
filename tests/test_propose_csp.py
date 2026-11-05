@@ -127,7 +127,8 @@ ROW = {
 
 
 class _ClockStub:
-    """getattr(result.clock, "is_open", None) is all run.py:141 reads."""
+    """ScanResult.clock placeholder. Since Brief 2 run.py reads is_open from
+    its own broker clock, not from result.clock."""
 
     is_open = True
 
@@ -222,13 +223,15 @@ def _drive():
         )
         wheel_dryrun.scan_watchlist = lambda *a, **k: _synthetic_scan_result()
         # 13a.2: run() reads the broker clock first; fake it (no network).
+        # Brief 2: market_open on the proposal line is this run clock's
+        # is_open (one clock, D13), so it is True here.
         TradingClient.get_clock = lambda self: type("C", (), {
             "timestamp": datetime.datetime(
                 2026, 10, 20, 15, 0, tzinfo=datetime.timezone.utc),
-            "is_open": False})()
+            "is_open": True})()
 
         with contextlib.redirect_stdout(buf):
-            ret = run(dry_run=True)
+            ret = run()
 
         conn = sqlite3.connect(str(tmp_journal))
         conn.row_factory = sqlite3.Row
@@ -298,7 +301,7 @@ def main():
     # (a) noop path returns 0
     passed += _check(
         failures, ret == 0,
-        f"(a) run(dry_run=True) should return 0 on the noop path, got {ret!r}")
+        f"(a) run() should return 0 on the noop path, got {ret!r}")
 
     # (b) stdout carries the rendered proposal line. Substring checks only -
     #     EXPECTED_LINE is anti-mirror, never built by calling _proposal_line.

@@ -189,7 +189,8 @@ class ScanResult:
     earnings_by_ticker - {ticker: parsed earnings_date or None}.
     coll               - compute_collateral_numbers() output.
     approved / wl_rejected / wl_warnings - load_watchlist() output.
-    clock              - trading_client.get_clock() result.
+    clock              - the caller's clock, or the scan's own get_clock()
+                         result when the caller passed None.
     chain_fetch_errors - preformatted stderr warning strings for any
                          get_option_chain failure; main() prints them to
                          stderr (kept out of the report, same as before).
@@ -222,10 +223,15 @@ class ScanResult:
 
 
 def scan_watchlist(trading_client, stock_client, option_client, policy, now_et,
-                   run_date):
+                   run_date, clock=None):
     """Pure-ish scan: assumes throttle already initialized and clients already
     built. Returns ScanResult. Does NO printing, NO file writing, NO sys.exit.
     The caller renders and writes.
+
+    clock: the caller's broker Clock (D13). When given, the scan never calls
+    get_clock and ScanResult.clock is that same object; run.py always passes
+    the clock it read once. When None (standalone main() only), the scan
+    reads its own clock with one get_clock call, as before.
 
     Raises WatchlistStructureError if the watchlist is unreadable - the caller
     decides (main() prints FATAL and exits 1).
@@ -256,8 +262,9 @@ def scan_watchlist(trading_client, stock_client, option_client, policy, now_et,
 
     approved, wl_rejected, wl_warnings = load_watchlist(str(WATCHLIST_PATH), now_et)
 
-    throttle("get_clock")
-    clock = trading_client.get_clock()
+    if clock is None:
+        throttle("get_clock")
+        clock = trading_client.get_clock()
 
     trace_lines = []
 
