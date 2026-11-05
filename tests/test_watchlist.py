@@ -47,7 +47,9 @@ class T:
 
 
 def _sha(p):
-    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+    # Absent file hashes to None, so the guard also catches the test creating one.
+    p = Path(p)
+    return hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else None
 
 
 def base(**over):
