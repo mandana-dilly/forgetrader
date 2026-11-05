@@ -1,0 +1,8 @@
+[Unit]
+Description=ForgeTrader dry-run (never submits)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/forgetrader
+ExecStart=%h/forgetrader/.venv/bin/python -m forgetrader.run --dry-run
+UMask=0077

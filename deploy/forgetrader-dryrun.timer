@@ -1,0 +1,10 @@
+[Unit]
+Description=ForgeTrader dry-run, US market hours
+
+[Timer]
+OnCalendar=Mon..Fri 10:30 America/New_York
+OnCalendar=Mon..Fri 13:00 America/New_York
+Persistent=false
+
+[Install]
+WantedBy=timers.target
