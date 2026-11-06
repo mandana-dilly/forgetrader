@@ -1,0 +1,158 @@
+Brief 3 recon, raw output, taken on branch b3-remove-set-state at main 0dff995 before any edit.
+
+$ grep -rn "set-state\|set_state" --include=*.py .
+forgetrader_state.py:14:  * a manual test path                             -> CLI --show / --set-state / --init
+forgetrader_state.py:760:def cmd_set_state(args):
+forgetrader_state.py:761:    stage = args.set_state
+forgetrader_state.py:773:    state["last_run"] = {"ts": _now_iso(), "outcome": f"manual_set_state:{stage}"}
+forgetrader_state.py:778:    record_run(conn, run_id, "manual_set_state")
+forgetrader_state.py:779:    record_decision(conn, run_id, stage_from, stage, "manual_set_state",
+forgetrader_state.py:780:                    detail="CLI --set-state (testing only)")
+forgetrader_state.py:796:    g.add_argument("--set-state", metavar="STAGE", choices=STAGES,
+forgetrader_state.py:807:    if args.set_state:
+forgetrader_state.py:808:        return cmd_set_state(args)
+(as run: piped through grep -v "^./.venv" to drop third-party matches; no tests/ file matched)
+
+$ git show main:forgetrader_state.py | nl -ba | sed -n 35,38p   (state path resolution)
+    35	SCRIPT_DIR = Path(__file__).resolve().parent
+    36	STATE_PATH = SCRIPT_DIR / "state.json"
+    37	JOURNAL_PATH = SCRIPT_DIR / "journal.db"
+    38	SCANS_DIR = SCRIPT_DIR / "scans"
+
+$ git show main:forgetrader_state.py | nl -ba | sed -n 390,412p   (load_state, atomic write_state)
+   390	def load_state(path=STATE_PATH):
+   391	    """Read state.json. Raises FileNotFoundError if it does not exist."""
+   392	    with open(path, "r") as f:
+   393	        return json.load(f)
+   394	
+   395	
+   396	def write_state(state, path=STATE_PATH):
+   397	    """Atomic write: temp file in the same dir, then os.replace()."""
+   398	    path = Path(path)
+   399	    state["generated_at"] = _now_iso()
+   400	    tmp = path.with_name(path.name + ".tmp")
+   401	    with open(tmp, "w") as f:
+   402	        json.dump(state, f, indent=2)
+   403	        f.write("\n")
+   404	        f.flush()
+   405	        os.fsync(f.fileno())
+   406	    os.replace(tmp, path)
+   407	    dfd = os.open(str(path.parent), os.O_RDONLY)
+   408	    try:
+   409	        os.fsync(dfd)
+   410	    finally:
+   411	        os.close(dfd)
+   412	    return path
+
+$ git show main:forgetrader_state.py | nl -ba | sed -n 714,813p   (CLI handlers, argparse block, main)
+   714	# --------------------------------------------------------------------------- #
+   715	# CLI                                                                        #
+   716	# --------------------------------------------------------------------------- #
+   717	
+   718	def cmd_show(_args):
+   719	    try:
+   720	        state = load_state()
+   721	    except FileNotFoundError:
+   722	        print(f"no state at {STATE_PATH} - run --init first", file=sys.stderr)
+   723	        return 1
+   724	    print(json.dumps(state, indent=2))
+   725	    return 0
+   726	
+   727	
+   728	def cmd_init(_args):
+   729	    if STATE_PATH.exists():
+   730	        print(f"REFUSE: {STATE_PATH} exists. init never overwrites. Move it aside "
+   731	              f"deliberately if a fresh FLAT state is truly intended.", file=sys.stderr)
+   732	        return 3
+   733	    financials = {}
+   734	    try:
+   735	        financials = read_broker_financials()
+   736	        print("broker facts read OK (equity/cash/options_bp/positions populated)")
+   737	    except Exception as e:  # noqa: BLE001 - off-hours / no-network is expected
+   738	        print(f"WARN: broker read failed ({type(e).__name__}: {e}); "
+   739	              f"writing FLAT state with null financials", file=sys.stderr)
+   740	
+   741	    state = fresh_flat_state(
+   742	        equity=financials.get("equity", 0.0),
+   743	        cash=financials.get("cash", 0.0),
+   744	        options_buying_power=financials.get("options_buying_power"),
+   745	        positions=financials.get("positions"),
+   746	        last_outcome="init",
+   747	    )
+   748	    write_state(state)
+   749	
+   750	    conn = journal_connect()
+   751	    run_id = new_run_id()
+   752	    record_run(conn, run_id, "init")
+   753	    record_decision(conn, run_id, None, FLAT, "init", detail="fresh FLAT state written")
+   754	    conn.close()
+   755	
+   756	    print(f"wrote fresh FLAT state -> {STATE_PATH}")
+   757	    return 0
+   758	
+   759	
+   760	def cmd_set_state(args):
+   761	    stage = args.set_state
+   762	    if stage not in STAGES:
+   763	        print(f"invalid stage {stage!r}; one of {STAGES}", file=sys.stderr)
+   764	        return 3
+   765	    try:
+   766	        state = load_state()
+   767	    except FileNotFoundError:
+   768	        print(f"no state at {STATE_PATH} - run --init first", file=sys.stderr)
+   769	        return 3
+   770	
+   771	    stage_from = state["wheel"]["stage"]
+   772	    state["wheel"]["stage"] = stage
+   773	    state["last_run"] = {"ts": _now_iso(), "outcome": f"manual_set_state:{stage}"}
+   774	    write_state(state)
+   775	
+   776	    conn = journal_connect()
+   777	    run_id = new_run_id()
+   778	    record_run(conn, run_id, "manual_set_state")
+   779	    record_decision(conn, run_id, stage_from, stage, "manual_set_state",
+   780	                    detail="CLI --set-state (testing only)")
+   781	    conn.close()
+   782	
+   783	    print(f"stage {stage_from} -> {stage} (manual)")
+   784	    return 0
+   785	
+   786	
+   787	def build_parser():
+   788	    p = argparse.ArgumentParser(
+   789	        prog="forgetrader_state",
+   790	        description="ForgeTrader persistence layer foundation (Brief 9).",
+   791	    )
+   792	    g = p.add_mutually_exclusive_group(required=True)
+   793	    g.add_argument("--show", action="store_true", help="print current state.json")
+   794	    g.add_argument("--init", action="store_true",
+   795	                   help="write a fresh FLAT state (broker facts if reachable)")
+   796	    g.add_argument("--set-state", metavar="STAGE", choices=STAGES,
+   797	                   help="manually set wheel.stage for testing")
+   798	    return p
+   799	
+   800	
+   801	def main(argv=None):
+   802	    args = build_parser().parse_args(argv)
+   803	    if args.show:
+   804	        return cmd_show(args)
+   805	    if args.init:
+   806	        return cmd_init(args)
+   807	    if args.set_state:
+   808	        return cmd_set_state(args)
+   809	    return 2
+   810	
+   811	
+   812	if __name__ == "__main__":
+   813	    sys.exit(main())
+
+$ grep -rn "cmd_init\|--init\|build_parser\|subprocess" tests/*.py   (main)
+(no matches: no suite exercised the CLI before B3)
+
+Findings from recon:
+1. STATE_PATH / JOURNAL_PATH are SCRIPT_DIR-relative (Path(__file__).resolve().parent), not cwd-relative.
+   test_state_cli.py therefore copies the source into a mkdtemp dir and runs the copy (cwd = that dir).
+2. No suite used --set-state: nothing to delete or replace in existing tests.
+3. No suite exercised --init at all, so M1/M2 could bite nothing before B3. test_state_cli.py adds I1-I3.
+4. docs/INSTRUCTIONS.md still describes --set-state (D7 exit-3 row, CLI line 203, recovery step line 212,
+   Phase X line 262, critical path line 257). Not edited (brief: do not edit docs/).

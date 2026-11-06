@@ -11,7 +11,7 @@ This module is the foundation only. It defines:
   * the reconciliation function (pure, SDK-free)   -> reconcile
   * the append-only journal (journal.db)           -> journal_connect / record_*
   * a HALT diagnostic path                         -> dump_halt / alert_stub
-  * a manual test path                             -> CLI --show / --set-state / --init
+  * a manual test path                             -> CLI --show / --init
 
 It does NOT detect live assignments, place orders, or wire Telegram. Those sit
 on top later. `reconcile` takes a plain dict of broker facts and never touches
@@ -757,33 +757,6 @@ def cmd_init(_args):
     return 0
 
 
-def cmd_set_state(args):
-    stage = args.set_state
-    if stage not in STAGES:
-        print(f"invalid stage {stage!r}; one of {STAGES}", file=sys.stderr)
-        return 3
-    try:
-        state = load_state()
-    except FileNotFoundError:
-        print(f"no state at {STATE_PATH} - run --init first", file=sys.stderr)
-        return 3
-
-    stage_from = state["wheel"]["stage"]
-    state["wheel"]["stage"] = stage
-    state["last_run"] = {"ts": _now_iso(), "outcome": f"manual_set_state:{stage}"}
-    write_state(state)
-
-    conn = journal_connect()
-    run_id = new_run_id()
-    record_run(conn, run_id, "manual_set_state")
-    record_decision(conn, run_id, stage_from, stage, "manual_set_state",
-                    detail="CLI --set-state (testing only)")
-    conn.close()
-
-    print(f"stage {stage_from} -> {stage} (manual)")
-    return 0
-
-
 def build_parser():
     p = argparse.ArgumentParser(
         prog="forgetrader_state",
@@ -793,8 +766,6 @@ def build_parser():
     g.add_argument("--show", action="store_true", help="print current state.json")
     g.add_argument("--init", action="store_true",
                    help="write a fresh FLAT state (broker facts if reachable)")
-    g.add_argument("--set-state", metavar="STAGE", choices=STAGES,
-                   help="manually set wheel.stage for testing")
     return p
 
 
@@ -804,8 +775,6 @@ def main(argv=None):
         return cmd_show(args)
     if args.init:
         return cmd_init(args)
-    if args.set_state:
-        return cmd_set_state(args)
     return 2
 
 
