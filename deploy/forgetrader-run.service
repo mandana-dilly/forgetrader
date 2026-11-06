@@ -1,0 +1,8 @@
+[Unit]
+Description=ForgeTrader live run (paper only until Phase W, D27)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/forgetrader
+ExecStart=%h/forgetrader/.venv/bin/python -m forgetrader.run --live
+UMask=0077

@@ -1,5 +1,5 @@
 [Unit]
-Description=ForgeTrader dry-run, US market hours
+Description=ForgeTrader live run, US market hours (D27)
 
 [Timer]
 OnCalendar=Mon..Fri 10:30 America/New_York
