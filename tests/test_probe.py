@@ -2,7 +2,8 @@
 
 Fake trading + option clients (test_run_stages pattern). Patched seams:
 credentials.load_credentials, probe.TradingClient / OptionHistoricalDataClient,
-probe.WATCHLIST_PATH, fs.read_broker_financials, fs.alert_stub. fs.STATE_PATH /
+probe.WATCHLIST_PATH, fs.read_broker_financials, fs.alert_stub, alerts.send
+(captured, never the network; test_alerts.py passes its own). fs.STATE_PATH /
 JOURNAL_PATH point at a mkdtemp dir; the real state.json / journal.db are
 hashed before vs after.
 
@@ -25,6 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import alerts
 import credentials
 import forgetrader_state as fs
 from forgetrader import probe
@@ -98,7 +100,7 @@ def _quote(bid=0.95, ask=0.99, age_min=1, naive=False):
 
 def _drive(argv, paper=True, clock_ts=CLOCK, is_open=True, fin=None,
            contract=PUT, watch=WATCH, cash=1300.0, quote=None, raise_submit=None,
-           state=None, no_state=False, quote_absent=False):
+           state=None, no_state=False, quote_absent=False, send=None):
     tmp = Path(tempfile.mkdtemp(prefix="probe_"))
     st, jr, wl = tmp / "state.json", tmp / "journal.db", tmp / "watchlist.json"
     wl.write_text(json.dumps(watch))
@@ -110,6 +112,7 @@ def _drive(argv, paper=True, clock_ts=CLOCK, is_open=True, fin=None,
     orig = {k: getattr(fs, k) for k in (
         "STATE_PATH", "JOURNAL_PATH", "read_broker_financials", "alert_stub")}
     orig_creds = credentials.load_credentials
+    orig_send = alerts.send
     orig_tc, orig_oc = probe.TradingClient, probe.OptionHistoricalDataClient
     orig_wl = probe.WATCHLIST_PATH
 
@@ -132,13 +135,14 @@ def _drive(argv, paper=True, clock_ts=CLOCK, is_open=True, fin=None,
         def get_option_latest_quote(self, req):
             return {} if quote_absent else super().get_option_latest_quote(req)
 
-    obs = {"alerts": []}
+    obs = {"alerts": [], "sent": []}
     out = io.StringIO()
     try:
         fs.STATE_PATH, fs.JOURNAL_PATH = st, jr
         fs.read_broker_financials = lambda tc=None, coid=None: dict(fin or FIN)
         fs.alert_stub = lambda msg: obs["alerts"].append(msg)
         credentials.load_credentials = lambda: ("k", "s", paper)
+        alerts.send = send if send is not None else obs["sent"].append
         probe.TradingClient, probe.OptionHistoricalDataClient = TC, OC
         probe.WATCHLIST_PATH = wl
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
@@ -166,6 +170,7 @@ def _drive(argv, paper=True, clock_ts=CLOCK, is_open=True, fin=None,
         for k, v in orig.items():
             setattr(fs, k, v)
         credentials.load_credentials = orig_creds
+        alerts.send = orig_send
         probe.TradingClient, probe.OptionHistoricalDataClient = orig_tc, orig_oc
         probe.WATCHLIST_PATH = orig_wl
 

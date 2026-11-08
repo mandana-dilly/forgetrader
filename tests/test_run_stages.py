@@ -5,7 +5,9 @@ reconcile_and_handle and REAL submit.place_csp. Patched seams:
 credentials.load_credentials (paper flag per scenario),
 fs.read_broker_financials (canned per scenario; kwargs + call count recorded),
 wheel_dryrun.scan_watchlist (AssertionError if called unless a scan is given;
-the clock kwarg it receives is recorded), fs.alert_stub (captured), and the
+the clock kwarg it receives is recorded), fs.alert_stub (captured),
+alerts.send (captured, never the network; test_alerts.py passes its own),
+and the
 three alpaca client classes run.py builds (FakeTC / FakeData: every
 construction and every broker method call is counted; get_clock returns a
 recorded clock object; any method a scenario does not expect raises).
@@ -64,6 +66,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import alpaca.data.historical.option as _alp_option
 import alpaca.data.historical.stock as _alp_stock
 import alpaca.trading.client as _alp_trading
+import alerts
 import credentials
 import forgetrader_state as fs
 import wheel_dryrun
@@ -123,7 +126,7 @@ def _sha(p):
 
 def _drive(t, name, seed_state, financials, clock_ts=CLOCK_DEFAULT, scan=None,
            live=False, paper=True, is_open=False, submit_raises=None,
-           expect_clock=1):
+           expect_clock=1, send=None):
     """Returns a dict of observations. Restores every patch in finally.
     Asserts the per-scenario T2 / T6 / T7 checks on `t` before returning."""
     tmp = Path(tempfile.mkdtemp(prefix="run_stages_"))
@@ -133,12 +136,14 @@ def _drive(t, name, seed_state, financials, clock_ts=CLOCK_DEFAULT, scan=None,
         "STATE_PATH", "JOURNAL_PATH", "SCANS_DIR", "load_state", "write_state",
         "journal_connect", "read_broker_financials", "alert_stub")}
     orig_creds = credentials.load_credentials
+    orig_send = alerts.send
     orig_scan = wheel_dryrun.scan_watchlist
     orig_clients = (_alp_trading.TradingClient, _alp_stock.StockHistoricalDataClient,
                     _alp_option.OptionHistoricalDataClient)
     ol, ow, oj = orig["load_state"], orig["write_state"], orig["journal_connect"]
 
-    obs = {"fin_calls": [], "cred_calls": 0, "alerts": [], "scan_called": False, "clock_calls": 0,
+    obs = {"fin_calls": [], "cred_calls": 0, "alerts": [], "sent": [],
+           "scan_called": False, "clock_calls": 0,
            "tmp_state": tmp_state, "tmp_scans": tmp_scans, "clients_built": 0,
            "broker_calls": [], "submit_calls": [], "clock_obj": None,
            "scan_clock": "NOT_CALLED", "disk_at_submit": None}
@@ -201,6 +206,7 @@ def _drive(t, name, seed_state, financials, clock_ts=CLOCK_DEFAULT, scan=None,
         fs.read_broker_financials = fake_fin
         fs.alert_stub = lambda msg: obs["alerts"].append(msg)
         credentials.load_credentials = fake_creds
+        alerts.send = send if send is not None else obs["sent"].append
         wheel_dryrun.scan_watchlist = fake_scan
         _alp_trading.TradingClient = FakeTC
         _alp_stock.StockHistoricalDataClient = FakeData
@@ -231,6 +237,7 @@ def _drive(t, name, seed_state, financials, clock_ts=CLOCK_DEFAULT, scan=None,
         for k, v in orig.items():
             setattr(fs, k, v)
         credentials.load_credentials = orig_creds
+        alerts.send = orig_send
         wheel_dryrun.scan_watchlist = orig_scan
         (_alp_trading.TradingClient, _alp_stock.StockHistoricalDataClient,
          _alp_option.OptionHistoricalDataClient) = orig_clients

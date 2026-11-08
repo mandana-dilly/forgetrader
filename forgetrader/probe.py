@@ -13,7 +13,8 @@ probe.py never calls write_state: the only state write is place_csp's
 write-ahead. No host clock is read; every date comes from the broker clock.
 
 Exit codes: 0 dry / submitted, 3 refused, 4 halt (submit failed after the
-write-ahead; reconcile sorts out what the broker did).
+write-ahead; reconcile sorts out what the broker did). A halt also sends one
+Telegram alert (alerts.send) after its journal rows; it never changes the exit.
 """
 import argparse
 import json
@@ -27,6 +28,7 @@ from alpaca.data.historical.option import OptionHistoricalDataClient
 from alpaca.data.requests import OptionLatestQuoteRequest
 from alpaca.trading.client import TradingClient
 
+import alerts
 import credentials
 import forgetrader_state as fs
 import screener
@@ -206,6 +208,7 @@ def main(argv=None):
             return 3
         fs.alert_stub(f"HALT:probe {res['detail']} coid={res['client_order_id']}")
         print(f"PROBE HALT {res['detail']}", file=sys.stderr)
+        alerts.send(f"probe:halt {res['detail']} coid={res['client_order_id']}")
         return 4
     finally:
         conn.close()

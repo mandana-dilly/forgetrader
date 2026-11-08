@@ -66,6 +66,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import alerts
 import credentials
 import forgetrader_state as fs
 import wheel_dryrun
@@ -180,6 +181,7 @@ def _drive():
         "reconcile_and_handle": fs.reconcile_and_handle,
     }
     orig_load_credentials = credentials.load_credentials
+    orig_send = alerts.send
     orig_scan_watchlist = wheel_dryrun.scan_watchlist
     from alpaca.trading.client import TradingClient
     orig_get_clock = TradingClient.get_clock
@@ -212,6 +214,7 @@ def _drive():
 
         # --- live seams (harness A: branch runs in place, nothing extracted)
         credentials.load_credentials = lambda: ("k", "s", True)
+        alerts.send = lambda text: None  # never the network (Brief 4)
         fs.read_broker_financials = (
             lambda trading_client=None, tracked_client_order_id=None:
                 dict(CANNED_FLAT_FINANCIALS)
@@ -249,6 +252,7 @@ def _drive():
         fs.read_broker_financials = orig["read_broker_financials"]
         fs.reconcile_and_handle = orig["reconcile_and_handle"]
         credentials.load_credentials = orig_load_credentials
+        alerts.send = orig_send
         wheel_dryrun.scan_watchlist = orig_scan_watchlist
         TradingClient.get_clock = orig_get_clock
 

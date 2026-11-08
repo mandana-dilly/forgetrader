@@ -1,0 +1,309 @@
+Brief 4 recon, raw output, taken on branch b4-telegram at main 41de9ba before any edit.
+
+$ grep -rn "alert_stub\|dump_halt" --include=*.py . | grep -v "^./.venv"
+forgetrader_state.py:13:  * a HALT diagnostic path                         -> dump_halt / alert_stub
+forgetrader_state.py:524:def alert_stub(msg):
+forgetrader_state.py:529:def dump_halt(broker_snapshot, state, reason):
+forgetrader_state.py:550:    diagnostic dump and fires alert_stub; on any action it journals a decision
+forgetrader_state.py:556:        path = dump_halt(broker_snapshot, state, reason)
+forgetrader_state.py:557:        alert_stub(f"HALT {reason} | dump {path}")
+tests/test_run_stages.py:8:the clock kwarg it receives is recorded), fs.alert_stub (captured), and the
+tests/test_run_stages.py:134:        "journal_connect", "read_broker_financials", "alert_stub")}
+tests/test_run_stages.py:202:        fs.alert_stub = lambda msg: obs["alerts"].append(msg)
+forgetrader/submit.py:119:            fs.alert_stub(
+tests/test_reconcile_handle.py:6:dump_halt / alert_stub / record_decision seam it drives) is the only logic
+tests/test_reconcile_handle.py:11:in-memory sqlite journal, and a spy on alert_stub. Standalone script, no
+tests/test_reconcile_handle.py:15:  dump_halt resolves SCANS_DIR, and reconcile_and_handle resolves
+tests/test_reconcile_handle.py:16:  alert_stub, against the forgetrader_state MODULE namespace at call time.
+tests/test_reconcile_handle.py:17:  So the only correct patch points are `fs.SCANS_DIR` and `fs.alert_stub`.
+tests/test_reconcile_handle.py:63:    """Patch fs.SCANS_DIR + fs.alert_stub, drive reconcile_and_handle once,
+tests/test_reconcile_handle.py:74:    orig_alert = fs.alert_stub
+tests/test_reconcile_handle.py:79:        fs.alert_stub = lambda m: calls.append(m)
+tests/test_reconcile_handle.py:110:        fs.alert_stub = orig_alert
+tests/test_probe.py:5:probe.WATCHLIST_PATH, fs.read_broker_financials, fs.alert_stub. fs.STATE_PATH /
+tests/test_probe.py:111:        "STATE_PATH", "JOURNAL_PATH", "read_broker_financials", "alert_stub")}
+tests/test_probe.py:140:        fs.alert_stub = lambda msg: obs["alerts"].append(msg)
+forgetrader/probe.py:207:        fs.alert_stub(f"HALT:probe {res['detail']} coid={res['client_order_id']}")
+forgetrader/run.py:135:            fs.alert_stub(f"HALT state_missing | {fs.STATE_PATH} absent; "
+forgetrader/run.py:191:            fs.alert_stub(f"HALT {reason}")
+forgetrader/run.py:207:            path = fs.dump_halt(financials, state, reason)
+forgetrader/run.py:208:            fs.alert_stub(f"HALT {reason} | dump {path}")
+forgetrader/run.py:237:                fs.alert_stub(f"HALT {reason}")
+
+$ nl -ba forgetrader_state.py | sed -n 520,563p   (alert_stub, dump_halt, reconcile_and_handle)
+   520	# --------------------------------------------------------------------------- #
+   521	# HALT diagnostics + alerting                                                #
+   522	# --------------------------------------------------------------------------- #
+   523	
+   524	def alert_stub(msg):
+   525	    """Placeholder alert sink. Telegram wiring is a later one-line swap."""
+   526	    print(f"ALERT: {msg}")
+   527	
+   528	
+   529	def dump_halt(broker_snapshot, state, reason):
+   530	    """Write scans/state_halt_<ts>.txt with the reason, current state, and the
+   531	    broker snapshot that triggered the HALT. Returns the path written."""
+   532	    SCANS_DIR.mkdir(exist_ok=True)
+   533	    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
+   534	    path = SCANS_DIR / f"state_halt_{ts}.txt"
+   535	    with open(path, "w") as f:
+   536	        f.write("FORGETRADER STATE HALT\n")
+   537	        f.write(f"written_at : {_now_iso()}\n")
+   538	        f.write(f"reason     : {reason}\n\n")
+   539	        f.write("----- current state -----\n")
+   540	        f.write(json.dumps(state, indent=2, default=str))
+   541	        f.write("\n\n----- broker snapshot -----\n")
+   542	        f.write(json.dumps(broker_snapshot, indent=2, default=str))
+   543	        f.write("\n")
+   544	    return path
+   545	
+   546	
+   547	def reconcile_and_handle(state, broker_snapshot, conn=None, run_id=None,
+   548	                         as_of_date=None):
+   549	    """Non-pure wrapper around reconcile(): on a HALT action it writes the
+   550	    diagnostic dump and fires alert_stub; on any action it journals a decision
+   551	    row when a connection + run_id are supplied. Returns (new_state, action)."""
+   552	    stage_from = state["wheel"]["stage"]
+   553	    new_state, action = reconcile(state, broker_snapshot, as_of_date)
+   554	    if action.startswith("HALT:"):
+   555	        reason = action[len("HALT:"):]
+   556	        path = dump_halt(broker_snapshot, state, reason)
+   557	        alert_stub(f"HALT {reason} | dump {path}")
+   558	    if conn is not None and run_id is not None:
+   559	        record_decision(
+   560	            conn, run_id, stage_from, new_state["wheel"]["stage"], action,
+   561	            detail=json.dumps(broker_snapshot, default=str),
+   562	        )
+   563	    return new_state, action
+
+$ nl -ba forgetrader/run.py | sed -n 113,170p   (_halt_exit; state_missing and not_paper exits)
+   113	def _halt_exit(conn, run_id, state, action, mode):
+   114	    """Common HALT tail: sets last_run only (never refreshes money itself),
+   115	    writes the state it is given, journals the run row, returns 4."""
+   116	    state["last_run"] = {"ts": fs._now_iso(), "outcome": f"{mode}:{action}"}
+   117	    fs.write_state(state)
+   118	    fs.record_run(conn, run_id, f"{mode}:{action}")
+   119	    return 4
+   120	
+   121	
+   122	def run(live=False):
+   123	    """One run. live=False (default) never submits; live=True may submit one
+   124	    CSP via place_csp when _submit_gate passes. Returns the exit code."""
+   125	    mode = "live" if live is True else "dryrun"
+   126	    run_id = fs.new_run_id()
+   127	    conn = fs.journal_connect()
+   128	    try:
+   129	        # 1. LOAD state FIRST. Missing state is a HALT, never a creation path:
+   130	        #    write_state is deliberately NOT called here. Corrupt JSON is not
+   131	        #    caught - it stays a loud uncaught failure.
+   132	        try:
+   133	            state = fs.load_state()
+   134	        except FileNotFoundError:
+   135	            fs.alert_stub(f"HALT state_missing | {fs.STATE_PATH} absent; "
+   136	                          f"run --init deliberately")
+   137	            fs.record_run(conn, run_id, f"{mode}:HALT:state_missing")
+   138	            print(f"HALT state_missing: {fs.STATE_PATH} absent; run --init "
+   139	                  f"deliberately", file=sys.stderr)
+   140	            return 4
+   141	        stage = state["wheel"]["stage"]
+   142	        tracked = (state["wheel"].get("client_order_id")
+   143	                   if stage in (fs.CSP_PENDING, fs.CC_PENDING) else None)
+   144	
+   145	        # 2-3. Credentials, then the SDK clients ONCE for this process. All
+   146	        #    imports are local so `import forgetrader.run` still needs no
+   147	        #    alpaca-py.
+   148	        from alpaca.trading.client import TradingClient
+   149	        from alpaca.data.historical.stock import StockHistoricalDataClient
+   150	        from alpaca.data.historical.option import OptionHistoricalDataClient
+   151	        import screener
+   152	        import wheel_dryrun
+   153	        from watchlist import WatchlistStructureError
+   154	        from zoneinfo import ZoneInfo
+   155	
+   156	        from credentials import load_credentials
+   157	        from forgetrader.submit import place_csp
+   158	
+   159	        api_key, api_secret, paper = load_credentials()
+   160	
+   161	        # --live is paper-only until Phase W: refuse BEFORE any client exists
+   162	        # or any broker read. No state write.
+   163	        if live is True and paper is not True:
+   164	            fs.record_decision(conn, run_id, stage_from=stage, stage_to=stage,
+   165	                               action="refused:not_paper", detail="")
+   166	            fs.record_run(conn, run_id, f"{mode}:refused:not_paper")
+   167	            print("REFUSED not_paper: --live requires a paper account",
+   168	                  file=sys.stderr)
+   169	            return 3
+   170	
+
+$ nl -ba forgetrader/run.py | sed -n 186,242p   (clock, snapshot, reconcile, watchlist_structure HALTs)
+   186	        clock = trading_client.get_clock()
+   187	        ts = getattr(clock, "timestamp", None)
+   188	        if (clock is None or ts is None or ts.tzinfo is None
+   189	                or ts.utcoffset() is None):
+   190	            reason = "clock timestamp missing or tz-naive"
+   191	            fs.alert_stub(f"HALT {reason}")
+   192	            fs.record_decision(conn, run_id, stage_from=stage, stage_to=stage,
+   193	                               action=f"HALT:{reason}", detail="")
+   194	            return _halt_exit(conn, run_id, state, f"HALT:{reason}", mode)
+   195	        now_et = ts.astimezone(ZoneInfo("America/New_York"))
+   196	        run_date = now_et.date()
+   197	
+   198	        # 4. READ broker truth (raises on auth/network failure - let it).
+   199	        financials = fs.read_broker_financials(
+   200	            trading_client=trading_client, tracked_client_order_id=tracked)
+   201	
+   202	        # 5. BUILD the snapshot; broker/wheel mismatch fails closed.
+   203	        try:
+   204	            snapshot = fs.build_snapshot(state["wheel"], financials)
+   205	        except fs.SnapshotError as e:
+   206	            reason = f"snapshot {e}"
+   207	            path = fs.dump_halt(financials, state, reason)
+   208	            fs.alert_stub(f"HALT {reason} | dump {path}")
+   209	            fs.record_decision(conn, run_id, stage_from=stage, stage_to=stage,
+   210	                               action=f"HALT:{reason}", detail="")
+   211	            return _halt_exit(conn, run_id, state, f"HALT:{reason}", mode)
+   212	
+   213	        # 6. RECONCILE at any stage (dumps + alerts + journals on HALT itself).
+   214	        new_state, action = fs.reconcile_and_handle(
+   215	            state, snapshot, conn=conn, run_id=run_id,
+   216	            as_of_date=run_date)
+   217	        if action.startswith("HALT:"):
+   218	            return _halt_exit(conn, run_id, new_state, action, mode)
+   219	
+   220	        # 7. Non-HALT: refresh the money fields from this read. Runs before
+   221	        #    the submit branch, so place_csp receives the refreshed state.
+   222	        new_state["equity"] = financials["equity"]
+   223	        new_state["cash"] = financials["cash"]
+   224	        new_state["options_buying_power"] = financials["options_buying_power"]
+   225	        new_state["positions"] = financials["positions"]
+   226	
+   227	        # 8. Scan only on exactly "noop:FLAT stable" (a transition INTO FLAT
+   228	        #    this run does not scan; the next run does).
+   229	        outcome = f"{mode}:{action}"
+   230	        if action == "noop:FLAT stable":
+   231	            try:
+   232	                result = wheel_dryrun.scan_watchlist(
+   233	                    trading_client, stock_client, option_client, policy,
+   234	                    now_et, run_date, clock=clock)
+   235	            except WatchlistStructureError as e:
+   236	                reason = f"watchlist_structure {e}"
+   237	                fs.alert_stub(f"HALT {reason}")
+   238	                fs.record_decision(conn, run_id, stage_from=fs.FLAT,
+   239	                                   stage_to=fs.FLAT, action=f"HALT:{reason}",
+   240	                                   detail="")
+   241	                return _halt_exit(conn, run_id, new_state, f"HALT:{reason}",
+   242	                                  mode)
+
+$ nl -ba forgetrader/run.py | sed -n 283,314p   (HALT:submit and the normal exit)
+   283	                fs.record_decision(
+   284	                    conn, run_id, stage_from=fs.FLAT,
+   285	                    stage_to=new_state["wheel"]["stage"], action=token,
+   286	                    detail=_no_redirect(json.dumps(res, sort_keys=True)))
+   287	                if res["outcome"] == "halt":
+   288	                    print(f"HALT submit {_no_redirect(res['detail'])} "
+   289	                          f"coid={coid}", file=sys.stderr)
+   290	                    return _halt_exit(conn, run_id, new_state, token, mode)
+   291	                print(f"LIVE {token} broker_order_id={res['broker_order_id']}")
+   292	                outcome = f"{mode}:{token}"
+   293	            elif gate != "dry_run":
+   294	                fs.record_decision(conn, run_id, stage_from=fs.FLAT,
+   295	                                   stage_to=fs.FLAT, action=gate, detail="")
+   296	                print(f"LIVE {gate}")
+   297	                outcome = f"{mode}:{gate}"
+   298	        elif new_state["wheel"]["stage"] == fs.HOLDING:
+   299	            fs.record_decision(conn, run_id, stage_from=fs.HOLDING,
+   300	                               stage_to=fs.HOLDING,
+   301	                               action="hold:stage2_not_built", detail=action)
+   302	            print("WARNING: HOLDING - Stage 2 covered-call scan not built; "
+   303	                  "wheel stalled", file=sys.stderr)
+   304	
+   305	        # 10. WRITE state (atomic), journal the run outcome
+   306	        new_state["last_run"] = {"ts": fs._now_iso(), "outcome": outcome}
+   307	        fs.write_state(new_state)
+   308	        fs.record_run(conn, run_id, outcome)
+   309	        fs.record_event(conn, run_id, f"{mode}_complete", detail=action)
+   310	        print(f"RUN OK  stage={new_state['wheel']['stage']}  action={action}  "
+   311	              f"state: {fs.STATE_PATH}")
+   312	        return 0
+   313	    finally:
+   314	        conn.close()
+
+$ nl -ba forgetrader/probe.py | sed -n 186,211p   (probe HALT)
+   186	        if not args.submit:
+   187	            fs.record_run(conn, run_id, "probe:dry")
+   188	            return 0
+   189	
+   190	        proposal = {"final_pass": True, "contract_symbol": sym,
+   191	                    "underlying_symbol": root, "bid": limit, "probe": True}
+   192	        state_out, res = place_csp(tc, state, proposal, conn, run_id,
+   193	                                   ts.isoformat(), fs.STATE_PATH)
+   194	        outcome = res["outcome"]
+   195	        fs.record_decision(conn, run_id, stage_from=fs.FLAT,
+   196	                           stage_to=state_out["wheel"]["stage"],
+   197	                           action=f"probe:{outcome}",
+   198	                           detail=json.dumps(res, sort_keys=True))
+   199	        fs.record_run(conn, run_id, f"probe:{outcome}")
+   200	        if outcome == "submitted":
+   201	            print(f"PROBE SUBMITTED coid={res['client_order_id']} "
+   202	                  f"status={res['status']}")
+   203	            return 0
+   204	        if outcome == "refused":
+   205	            print(f"PROBE REFUSED {res['detail']}")
+   206	            return 3
+   207	        fs.alert_stub(f"HALT:probe {res['detail']} coid={res['client_order_id']}")
+   208	        print(f"PROBE HALT {res['detail']}", file=sys.stderr)
+   209	        return 4
+   210	    finally:
+   211	        conn.close()
+
+$ nl -ba forgetrader/submit.py | sed -n 111,122p   (place_csp HALT alert_stub; place_csp not modified)
+   111	    except Exception as e:
+   112	        try:
+   113	            fs.record_event(
+   114	                conn, run_id, "submit_exception", symbol=sym,
+   115	                detail=f"broker_reached={broker_reached} {type(e).__name__}: {e}")
+   116	        except Exception:
+   117	            pass
+   118	        try:
+   119	            fs.alert_stub(
+   120	                f"HALT:submit broker_reached={broker_reached} {type(e).__name__}")
+   121	        except Exception:
+   122	            pass
+
+$ nl -ba credentials.py
+     1	"""Single source of truth for Alpaca credential resolution.
+     2	Imports NO alpaca-py, so it is import-safe everywhere including forgetrader/run.py."""
+     3	import os
+     4	from pathlib import Path
+     5	from dotenv import load_dotenv
+     6	
+     7	_ENV_PATH = Path(__file__).resolve().parent / ".env"  # anchors to repo root, caller-location-independent
+     8	
+     9	
+    10	class CredentialsError(RuntimeError):
+    11	    """Raised when required Alpaca env vars are absent."""
+    12	
+    13	
+    14	def load_credentials() -> tuple[str, str, bool]:
+    15	    """Return (api_key, api_secret, paper). Raises CredentialsError if key/secret missing.
+    16	    Canonical var names ONLY: ALPACA_API_KEY / ALPACA_API_SECRET / ALPACA_PAPER."""
+    17	    load_dotenv(dotenv_path=_ENV_PATH)
+    18	    api_key = os.environ.get("ALPACA_API_KEY")
+    19	    api_secret = os.environ.get("ALPACA_API_SECRET")
+    20	    paper = os.environ.get("ALPACA_PAPER", "true").lower() == "true"
+    21	    if not api_key or not api_secret:
+    22	        raise CredentialsError("ALPACA_API_KEY or ALPACA_API_SECRET missing from .env")
+    23	    return api_key, api_secret, paper
+
+$ grep -n "^python-dotenv\|dotenv" requirements.txt
+12:python-dotenv==1.2.2
+
+Exit paths of run.run() after the run row is journalled (record_run):
+  state_missing: record_run then stderr print, return 4, no state write (state absent).
+  refused:not_paper: record_run, return 3, no state write.
+  _halt_exit (clock, snapshot, reconcile, watchlist_structure, submit): write_state, record_run, return 4.
+  normal: write_state, record_run, record_event, stdout RUN OK, return 0.
+  uncaught exception (exit 1): no run row, no state write.
+probe HALT: record_decision, record_run probe:halt, fs.alert_stub, stderr PROBE HALT, return 4.
+credentials: load_dotenv(dotenv_path=_ENV_PATH), _ENV_PATH = repo root .env (Path(__file__) anchored).

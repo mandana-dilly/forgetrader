@@ -27,7 +27,11 @@ Run sequence:
      "noop:FLAT stable", a proposal with final_pass True, run clock is_open
      True. place_csp gets the money-refreshed state; the state it returns is
      the state persisted (submitted and HALT:submit alike).
- 10. Write state.json atomically, journal the run, exit.
+ 10. Write state.json atomically, journal the run, then send ONE Telegram
+     summary (alerts.send: outcome, stage, ticker, top_rejects if any), exit.
+     Every HALT sends its HALT outcome instead, after its dump and journal
+     row; refused:not_paper sends its outcome after its run row. One message
+     per run. An alert failure never changes the exit code, state or journal.
 
 Every runs.outcome and last_run.outcome carries the mode prefix "dryrun:" or
 "live:" (state_missing included). Live FLAT-stable outcomes:
@@ -52,6 +56,7 @@ import argparse
 import json
 import sys
 
+import alerts
 import forgetrader_state as fs
 
 
@@ -80,11 +85,29 @@ def _all_rejected_line(approved_n, reject_tally, is_open, wl_rejected):
     the market-open flag, the most-common reject tokens, and the watchlist
     entries dropped before the scan (wl_rejected) - enough for morning-review
     to tell a genuine all-rejected from a closed-market empty."""
-    top = ", ".join(f"{tok}={cnt}" for tok, cnt in reject_tally.most_common(5))
     return (
         f"all_rejected approved={approved_n} market_open={is_open} "
-        f"top_rejects=[{top}] wl_rejected={_render_wl_rejected(wl_rejected)}"
+        f"top_rejects=[{_top_rejects(reject_tally)}] "
+        f"wl_rejected={_render_wl_rejected(wl_rejected)}"
     )
+
+
+def _top_rejects(reject_tally):
+    """The five most common reject tokens as "tok=n, ...". ONE renderer shared
+    by the all_rejected line and the Telegram summary."""
+    return ", ".join(f"{tok}={cnt}" for tok, cnt in reject_tally.most_common(5))
+
+
+def _summary(outcome, state, top_rejects=None):
+    """One-line Telegram text for a run: the journalled outcome, the wheel
+    stage and ticker of the state persisted (None when there is no state),
+    and top_rejects when the scan rejected everything."""
+    wheel = state["wheel"] if state is not None else {}
+    text = (f"{outcome} stage={wheel.get('stage')} "
+            f"ticker={wheel.get('ticker')}")
+    if top_rejects:
+        text += f" top_rejects=[{top_rejects}]"
+    return text
 
 
 def _no_redirect(text):
@@ -112,10 +135,12 @@ def _submit_gate(live, paper, action, proposal, is_open):
 
 def _halt_exit(conn, run_id, state, action, mode):
     """Common HALT tail: sets last_run only (never refreshes money itself),
-    writes the state it is given, journals the run row, returns 4."""
+    writes the state it is given, journals the run row, sends the HALT
+    outcome as the run's one alert, returns 4."""
     state["last_run"] = {"ts": fs._now_iso(), "outcome": f"{mode}:{action}"}
     fs.write_state(state)
     fs.record_run(conn, run_id, f"{mode}:{action}")
+    alerts.send(_summary(f"{mode}:{action}", state))
     return 4
 
 
@@ -137,6 +162,7 @@ def run(live=False):
             fs.record_run(conn, run_id, f"{mode}:HALT:state_missing")
             print(f"HALT state_missing: {fs.STATE_PATH} absent; run --init "
                   f"deliberately", file=sys.stderr)
+            alerts.send(_summary(f"{mode}:HALT:state_missing", None))
             return 4
         stage = state["wheel"]["stage"]
         tracked = (state["wheel"].get("client_order_id")
@@ -166,6 +192,7 @@ def run(live=False):
             fs.record_run(conn, run_id, f"{mode}:refused:not_paper")
             print("REFUSED not_paper: --live requires a paper account",
                   file=sys.stderr)
+            alerts.send(_summary(f"{mode}:refused:not_paper", state))
             return 3
 
         trading_client = TradingClient(api_key, api_secret, paper=paper)
@@ -227,6 +254,7 @@ def run(live=False):
         # 8. Scan only on exactly "noop:FLAT stable" (a transition INTO FLAT
         #    this run does not scan; the next run does).
         outcome = f"{mode}:{action}"
+        top_rejects = None
         if action == "noop:FLAT stable":
             try:
                 result = wheel_dryrun.scan_watchlist(
@@ -248,6 +276,7 @@ def run(live=False):
                 detail = _proposal_line(proposal, is_open)
             else:
                 scan_action = "all_rejected"
+                top_rejects = _top_rejects(result.reject_tally)
                 detail = _all_rejected_line(
                     len(result.approved), result.reject_tally, is_open,
                     result.wl_rejected)
@@ -302,13 +331,15 @@ def run(live=False):
             print("WARNING: HOLDING - Stage 2 covered-call scan not built; "
                   "wheel stalled", file=sys.stderr)
 
-        # 10. WRITE state (atomic), journal the run outcome
+        # 10. WRITE state (atomic), journal the run outcome, then alert.
         new_state["last_run"] = {"ts": fs._now_iso(), "outcome": outcome}
+        summary = _summary(outcome, new_state, top_rejects)
         fs.write_state(new_state)
         fs.record_run(conn, run_id, outcome)
         fs.record_event(conn, run_id, f"{mode}_complete", detail=action)
         print(f"RUN OK  stage={new_state['wheel']['stage']}  action={action}  "
               f"state: {fs.STATE_PATH}")
+        alerts.send(summary)
         return 0
     finally:
         conn.close()
