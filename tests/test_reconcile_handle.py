@@ -52,6 +52,8 @@ def _state_at(stage):
     """A schema-complete fresh state with wheel.stage forced to `stage`."""
     s = fs.fresh_flat_state()
     s["wheel"]["stage"] = stage
+    if stage == "CSP_OPEN":  # B5: assigned parses cost_basis from the put
+        s["wheel"]["contract_symbol"] = "NOK261120P00004000"
     return s
 
 

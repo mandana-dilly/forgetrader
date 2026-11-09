@@ -116,6 +116,9 @@ def _state(stage, contract=None, coid=None, ticker="F"):
                            "contract_symbol": contract})
         if coid is not None:
             s["wheel"]["client_order_id"] = coid
+        # B5: HOLDING / CC stages carry the basis an assignment sets.
+        if stage in (fs.HOLDING, fs.CC_PENDING, fs.CC_OPEN):
+            s["wheel"]["cost_basis"] = 12.0
     return s
 
 

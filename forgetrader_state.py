@@ -30,6 +30,7 @@ import sqlite3
 import sys
 import uuid
 from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -134,20 +135,71 @@ def _expiry_guard(stage, contract, as_of_date, right):
     return None
 
 
+def _put_strike_basis(contract):
+    """Pure. (cost_basis, None) from a put's OCC contract_symbol, the strike
+    field / 1000 parsed via Decimal and stored as a float (the schema's
+    numeric fields are JSON floats, see _safe_float); or (None, reason) when
+    the symbol is missing, unparseable or not a put. Never raises."""
+    if _contract_expiry(contract) is None:
+        return None, f"cannot parse strike from contract_symbol {contract!r}"
+    if contract[-9] != "P":
+        return None, f"contract_symbol {contract!r} right is not P"
+    try:
+        strike = Decimal(contract[-8:]) / Decimal(1000)
+    except InvalidOperation:
+        return None, f"cannot parse strike from contract_symbol {contract!r}"
+    return float(strike), None
+
+
+def _holding_basis_halt(state):
+    """Pure. HALT string if the wheel's cost_basis cannot anchor a covered
+    call (None, non-numeric, bool, NaN/inf, or <= 0), else None."""
+    basis = state["wheel"].get("cost_basis")
+    if (isinstance(basis, bool) or not isinstance(basis, (int, float))
+            or basis != basis or basis in (float("inf"), float("-inf"))
+            or basis <= 0):
+        return f"HALT:holding_basis_invalid cost_basis={basis!r}"
+    return None
+
+
+def _into_holding(state, trigger):
+    """apply_trigger for a reconcile transition INTO HOLDING, then the
+    holding_basis_invalid check on the result. HALT returns the input."""
+    new_state, action = apply_trigger(state, trigger)
+    if action.startswith("HALT:"):
+        return new_state, action
+    halt = _holding_basis_halt(new_state)
+    if halt:
+        return state, halt
+    return new_state, action
+
+
 def apply_trigger(state, trigger):
     """Pure. Apply `trigger` to the current stage via LEGAL_TRANSITIONS.
 
     Returns (new_state, action). On a legal pair, new_state is a deep copy with
     wheel.stage advanced and action "FROM->TO (trigger)". On an illegal pair the
     input state is returned UNCHANGED and action is "HALT:<reason>".
+
+    (CSP_OPEN, "assigned") sets wheel.cost_basis to the put's strike, parsed
+    from contract_symbol BEFORE the HOLDING allowlist reset clears it. A
+    missing or unparseable symbol, or a right char other than P, is a HALT
+    (input returned unchanged, no transition).
     """
     stage = state["wheel"]["stage"]
     key = (stage, trigger)
     if key not in LEGAL_TRANSITIONS:
         return state, f"HALT:no legal transition from {stage} on trigger {trigger!r}"
     to_stage = LEGAL_TRANSITIONS[key]
+    basis = None
+    if key == (CSP_OPEN, "assigned"):
+        basis, why = _put_strike_basis(state["wheel"].get("contract_symbol"))
+        if why:
+            return state, f"HALT:{stage} assigned {why}"
     new_state = copy.deepcopy(state)
     new_state["wheel"]["stage"] = to_stage
+    if key == (CSP_OPEN, "assigned"):
+        new_state["wheel"]["cost_basis"] = basis
     fresh_wheel = fresh_flat_state()["wheel"]
     if stage in (CSP_PENDING, CC_PENDING):
         new_state["wheel"]["client_order_id"] = fresh_wheel["client_order_id"]
@@ -182,6 +234,9 @@ def reconcile(state, broker_snapshot, as_of_date=None):
 
     as_of_date (datetime.date, the broker-clock ET date) guards the two
     expiry transitions; None fails closed there.
+
+    HOLDING stable and every transition INTO HOLDING require a numeric
+    cost_basis > 0, else "HALT:holding_basis_invalid ..." (input returned).
 
     Critical rule: at CSP_OPEN with the put absent, the choice between HOLDING
     and FLAT is made by INSPECTING broker_snapshot["shares"] - never inferred
@@ -242,7 +297,7 @@ def reconcile(state, broker_snapshot, as_of_date=None):
             return state, f"HALT:CSP_OPEN put still open but broker shows shares={shares}"
         # Put is absent. Decide by shares, never by the absence itself.
         if shares == LOT:
-            return apply_trigger(state, "assigned")
+            return _into_holding(state, "assigned")
         if shares == 0:
             halt = _expiry_guard(stage, state["wheel"].get("contract_symbol"),
                                  as_of_date, "P")
@@ -256,6 +311,9 @@ def reconcile(state, broker_snapshot, as_of_date=None):
 
     if stage == HOLDING:
         if shares == LOT and not put_open and not call_open:
+            halt = _holding_basis_halt(state)
+            if halt:
+                return state, halt
             return state, "noop:HOLDING stable"
         return state, (
             f"HALT:HOLDING but broker shows shares={shares} put_open={put_open} "
@@ -284,7 +342,7 @@ def reconcile(state, broker_snapshot, as_of_date=None):
                     f"HALT:CC_PENDING order {order_status} but broker shows "
                     f"shares={shares} call_open={call_open}"
                 )
-            return apply_trigger(state, "cancel_or_expire")
+            return _into_holding(state, "cancel_or_expire")
         return state, (
             f"HALT:CC_PENDING unclassifiable order status {order_status!r} "
             f"class {cls!r}"
@@ -303,7 +361,7 @@ def reconcile(state, broker_snapshot, as_of_date=None):
                                  as_of_date, "C")
             if halt:
                 return state, halt
-            return apply_trigger(state, "cc_expired_worthless")
+            return _into_holding(state, "cc_expired_worthless")
         return state, (
             f"HALT:CC_OPEN call gone and shares={shares} is neither flat (called "
             f"away) nor a full {LOT}-share lot (expiry)"

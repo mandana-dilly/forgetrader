@@ -43,9 +43,16 @@ def _state_at(stage):
     Built through the real schema (fresh_flat_state), then the stage is set
     directly so illegal / unknown stages ("GARBAGE") can be exercised too.
     generated_at / last_run.ts are nondeterministic and never asserted on.
+    B5: HOLDING and the CC stages carry the cost_basis an assignment sets;
+    reconcile HALTs holding_basis_invalid without it. CSP_OPEN carries a put
+    contract_symbol, which apply_trigger("assigned") parses into cost_basis.
     """
     s = fs.fresh_flat_state()
     s["wheel"]["stage"] = stage
+    if stage in ("HOLDING", "CC_PENDING", "CC_OPEN"):
+        s["wheel"]["cost_basis"] = 4.0
+    if stage == "CSP_OPEN":
+        s["wheel"]["contract_symbol"] = "NOK261120P00004000"
     return s
 
 

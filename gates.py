@@ -3,6 +3,8 @@
 Relocated UNTOUCHED from screener.py (Brief 7, Option A). Do not edit the
 moved functions without updating the golden-fixture regression test (Brief 7b).
 """
+import math
+from decimal import Decimal
 
 FAILS_DELIM = ";"
 
@@ -153,6 +155,178 @@ def evaluate_contract(contract, snap, underlying_price, underlying_price_ts,
         "collateral": collateral, "collateral_pass": collateral_pass,
         "annualized_yield_pct": round(annualized_yield_pct, 4) if annualized_yield_pct is not None else "",
         "yield_pass": yield_pass,
+        "all_pass": all_pass,
+        "rejected_by": FAILS_DELIM.join(fails),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Brief B5 - covered-call gate chain (Stage 2). evaluate_contract is untouched. #
+# --------------------------------------------------------------------------- #
+
+CALL_EARNINGS_TOKEN = "earnings_inside_option"
+
+
+def _aware(ts):
+    return (ts is not None and getattr(ts, "tzinfo", None) is not None
+            and ts.utcoffset() is not None)
+
+
+def evaluate_call(contract, snap, cost_basis, underlying_price,
+                  underlying_price_ts, run_ts, today, earnings_date,
+                  dte_min, dte_max, otm_above_basis_pct, min_bid, min_oi,
+                  max_spread_abs, max_spread_to_bid_ratio, min_yield_pct,
+                  max_staleness_min):
+    """Pure. One covered-call contract against every Stage 2 gate.
+
+    Every failing gate is counted (D9); missing values render as "".
+    Staleness is measured against run_ts, the run's broker clock timestamp
+    (D13), never the host clock; a price stamped after run_ts (fetched after
+    the clock read) is fresh. A missing or tz-naive timestamp fails closed.
+    today is the ET date of run_ts. The strike floor is compared in Decimal
+    so an exact boundary strike (25 * 1.10 = 27.50) is not lost to float
+    noise. Adjusted contracts fail exactly as in evaluate_contract.
+    """
+    fails = []
+
+    adjusted_pass = contract.root_symbol == contract.underlying_symbol
+    if not adjusted_pass:
+        fails.append("adjusted_contract")
+
+    sym = contract.symbol
+    right = sym[-9] if isinstance(sym, str) and len(sym) >= 16 else ""
+    right_pass = right == "C"
+    if not right_pass:
+        fails.append("right_not_call")
+
+    staleness_min = None
+    if _aware(underlying_price_ts) and _aware(run_ts):
+        staleness_min = (run_ts - underlying_price_ts).total_seconds() / 60
+    staleness_pass = staleness_min is not None and staleness_min <= max_staleness_min
+    if not staleness_pass:
+        fails.append("stale_underlying_price")
+
+    dte = (contract.expiration_date - today).days
+    dte_pass = dte_min <= dte <= dte_max
+    if not dte_pass:
+        fails.append("dte")
+
+    strike = contract.strike_price
+    basis_ok = (not isinstance(cost_basis, bool)
+                and isinstance(cost_basis, (int, float))
+                and math.isfinite(cost_basis) and cost_basis > 0)
+    if basis_ok:
+        floor_d = Decimal(repr(cost_basis)) * (1 + Decimal(repr(otm_above_basis_pct)) / 100)
+        strike_floor = float(floor_d)
+        strike_pass = Decimal(repr(strike)) >= floor_d
+        if not strike_pass:
+            fails.append("strike_below_basis_floor")
+    else:
+        strike_floor = None
+        strike_pass = False
+        fails.append("undefined_metric_basis")
+
+    if snap is None:
+        bid = ask = None
+        bid_pass = False
+        fails.append("no_snapshot")
+    elif snap.latest_quote is None:
+        bid = ask = None
+        bid_pass = False
+        fails.append("null_quote")
+    else:
+        q = snap.latest_quote
+        bid = q.bid_price
+        ask = q.ask_price
+        if bid is None:
+            bid_pass = False
+            fails.append("null_bid")
+        elif bid == 0:
+            bid_pass = False
+            fails.append("zero_bid")
+        elif bid < min_bid:
+            bid_pass = False
+            fails.append("bid_too_low")
+        else:
+            bid_pass = True
+
+    oi = parse_open_interest(contract.open_interest)
+    if oi is None:
+        oi_pass = False
+        fails.append("null_oi")
+    elif oi < min_oi:
+        oi_pass = False
+        fails.append("oi_too_low")
+    else:
+        oi_pass = True
+
+    spread_abs = spread_to_bid = None
+    if bid is None or ask is None:
+        spread_pass = False
+        fails.append("undefined_metric_spread")
+    else:
+        spread_abs = ask - bid
+        spread_pass = True
+        if spread_abs > max_spread_abs:
+            spread_pass = False
+            fails.append("spread_too_wide")
+        if bid <= 0:
+            spread_pass = False
+            fails.append("spread_ratio_undefined_no_bid")
+        else:
+            spread_to_bid = spread_abs / bid
+            if spread_to_bid > max_spread_to_bid_ratio:
+                spread_pass = False
+                fails.append("spread_wide_vs_bid")
+
+    if bid is not None and basis_ok and dte > 0:
+        annualized_yield_pct = (bid * 100) / (cost_basis * 100) * (365 / dte) * 100
+        yield_pass = annualized_yield_pct >= min_yield_pct
+        if not yield_pass:
+            fails.append("yield_too_low")
+    else:
+        annualized_yield_pct = None
+        yield_pass = False
+        fails.append("undefined_metric_yield")
+
+    earnings_pass = (earnings_date is not None
+                     and contract.expiration_date < earnings_date)
+    if not earnings_pass:
+        fails.append(CALL_EARNINGS_TOKEN)
+
+    all_pass = (adjusted_pass and right_pass and staleness_pass and dte_pass
+                and strike_pass and bid_pass and oi_pass and spread_pass
+                and yield_pass and earnings_pass)
+
+    return {
+        "underlying_symbol": contract.underlying_symbol,
+        "underlying_price": underlying_price if underlying_price is not None else "",
+        "underlying_price_ts": underlying_price_ts.isoformat() if underlying_price_ts is not None else "",
+        "underlying_staleness_min": round(staleness_min, 2) if staleness_min is not None else "",
+        "contract_symbol": sym,
+        "root_symbol": contract.root_symbol,
+        "right": right,
+        "expiration_date": str(contract.expiration_date),
+        "earnings_date": str(earnings_date) if earnings_date is not None else "",
+        "adjusted_pass": adjusted_pass,
+        "right_pass": right_pass,
+        "staleness_pass": staleness_pass,
+        "dte": dte, "dte_pass": dte_pass,
+        "strike": strike,
+        "cost_basis": cost_basis if basis_ok else "",
+        "strike_floor": strike_floor if strike_floor is not None else "",
+        "strike_pass": strike_pass,
+        "bid": bid if bid is not None else "",
+        "ask": ask if ask is not None else "",
+        "bid_pass": bid_pass,
+        "open_interest": oi if oi is not None else "",
+        "oi_pass": oi_pass,
+        "spread_abs": round(spread_abs, 4) if spread_abs is not None else "",
+        "spread_to_bid": round(spread_to_bid, 4) if spread_to_bid is not None else "",
+        "spread_pass": spread_pass,
+        "annualized_yield_pct": round(annualized_yield_pct, 4) if annualized_yield_pct is not None else "",
+        "yield_pass": yield_pass,
+        "earnings_pass": earnings_pass,
         "all_pass": all_pass,
         "rejected_by": FAILS_DELIM.join(fails),
     }
