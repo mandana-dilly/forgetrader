@@ -9,6 +9,60 @@
       "earnings_stamped": "2026-11-02",
       "own_100_note": "Willing to own 100 shares of NOK at strike if assigned; core telecom infra holding.",
       "review_by": "2026-12-03"
+    },
+    {
+      "ticker": "BAC",
+      "added": "2026-11-09",
+      "earnings_date": "2027-01-01",
+      "earnings_source": "BOUND (D17): fye=1231, FY Q4 cannot report before 31 Dec 2026; latest 8-K item 2.02 filed 2026-10-14. https://data.sec.gov/submissions/CIK0000070858.json",
+      "earnings_stamped": "2026-11-09",
+      "own_100_note": "Willing to own 100 shares of BAC at strike if assigned; large-cap US bank.",
+      "review_by": "2026-12-10"
+    },
+    {
+      "ticker": "CMCSA",
+      "added": "2026-11-09",
+      "earnings_date": "2027-01-01",
+      "earnings_source": "BOUND (D17): fye=1231, FY Q4 cannot report before 31 Dec 2026; latest 8-K item 2.02 filed 2026-10-22. https://data.sec.gov/submissions/CIK0001166691.json",
+      "earnings_stamped": "2026-11-09",
+      "own_100_note": "Willing to own 100 shares of CMCSA at strike if assigned; cash-generative cable and media.",
+      "review_by": "2026-12-10"
+    },
+    {
+      "ticker": "HAL",
+      "added": "2026-11-09",
+      "earnings_date": "2027-01-01",
+      "earnings_source": "BOUND (D17): fye=1231, FY Q4 cannot report before 31 Dec 2026; latest 8-K item 2.02 filed 2026-10-20. https://data.sec.gov/submissions/CIK0000045012.json",
+      "earnings_stamped": "2026-11-09",
+      "own_100_note": "Willing to own 100 shares of HAL at strike if assigned; accept oil-cycle exposure.",
+      "review_by": "2026-12-10"
+    },
+    {
+      "ticker": "PCG",
+      "added": "2026-11-09",
+      "earnings_date": "2027-01-01",
+      "earnings_source": "BOUND (D17): fye=1231, FY Q4 cannot report before 31 Dec 2026; latest 8-K item 2.02 filed 2026-10-22. https://data.sec.gov/submissions/CIK0001004980.json",
+      "earnings_stamped": "2026-11-09",
+      "own_100_note": "Willing to own 100 shares of PCG at strike if assigned; regulated utility, wildfire tail risk accepted.",
+      "review_by": "2026-12-10"
+    },
+    {
+      "ticker": "PFE",
+      "added": "2026-11-09",
+      "earnings_date": "2027-01-01",
+      "earnings_source": "BOUND (D17): fye=1231, FY Q4 cannot report before 31 Dec 2026; latest 8-K item 2.02 filed 2026-11-03. https://data.sec.gov/submissions/CIK0000078003.json",
+      "earnings_stamped": "2026-11-09",
+      "own_100_note": "Willing to own 100 shares of PFE at strike if assigned; large-cap pharma.",
+      "review_by": "2026-12-10"
+    },
+    {
+      "ticker": "T",
+      "added": "2026-11-09",
+      "earnings_date": "2027-01-01",
+      "earnings_source": "BOUND (D17): fye=1231, FY Q4 cannot report before 31 Dec 2026; latest 8-K item 2.02 filed 2026-10-21. https://data.sec.gov/submissions/CIK0000732717.json",
+      "earnings_stamped": "2026-11-09",
+      "own_100_note": "Willing to own 100 shares of T at strike if assigned; US telecom.",
+      "review_by": "2026-12-10"
     }
   ]
 }
