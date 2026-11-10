@@ -2,7 +2,8 @@
 """forgetrader run path - run-to-completion, single pass, no loop.
 
 Dry-run is the default and never submits. --live may submit ONE cash-secured
-put through submit.place_csp, and only when every _submit_gate condition holds.
+put through submit.place_csp (FLAT), or ONE covered call through
+submit.place_cc (HOLDING), and only when every _submit_gate condition holds.
 
 Run sequence:
   1. LOAD state.json first. Missing -> HALT:state_missing (exit 4); run.py
@@ -21,12 +22,17 @@ Run sequence:
   6. reconcile_and_handle at ANY stage (dumps + alerts + journals on HALT).
      HALT -> exit 4 with no money refresh.
   7. Non-HALT: refresh the money fields on the new state.
-  8. Scan the watchlist ONLY on exactly "noop:FLAT stable". At HOLDING,
-     journal hold:stage2_not_built and warn (Stage 2 is not built).
+  8. Scan the watchlist ONLY on exactly "noop:FLAT stable". Scan the held
+     ticker's calls (cc_scan.scan_calls, wheel ticker + cost_basis, the run
+     clock) ONLY on exactly "noop:HOLDING stable"; a transition INTO HOLDING
+     does not scan that run (D28 S4). A named ticker rejection is a decision
+     row + stderr WARNING + alert text, exit 0; chain fetch errors are one
+     chain_fetch_error event + stderr WARNING + alert text.
   9. Submit ONLY when _submit_gate passes: --live, paper True, action exactly
-     "noop:FLAT stable", a proposal with final_pass True, run clock is_open
-     True. place_csp gets the money-refreshed state; the state it returns is
-     the state persisted (submitted and HALT:submit alike).
+     the stage's stable noop, a passing proposal (final_pass / all_pass
+     True), run clock is_open True. place_csp / place_cc gets the
+     money-refreshed state; the state it returns is the state persisted
+     (submitted and HALT:submit alike).
  10. Write state.json atomically, journal the run, then send ONE Telegram
      summary (alerts.send: outcome, stage, ticker, top_rejects if any), exit.
      Every HALT sends its HALT outcome instead, after its dump and journal
@@ -34,7 +40,8 @@ Run sequence:
      per run. An alert failure never changes the exit code, state or journal.
 
 Every runs.outcome and last_run.outcome carries the mode prefix "dryrun:" or
-"live:" (state_missing included). Live FLAT-stable outcomes:
+"live:" (state_missing included). Live FLAT-stable and HOLDING-stable
+outcomes:
   live:submit:submitted status=STATUS coid=COID     exit 0
   live:submit:refused:CHECK                         exit 0, state untouched
   live:HALT:submit DETAIL                           exit 4
@@ -98,16 +105,34 @@ def _top_rejects(reject_tally):
     return ", ".join(f"{tok}={cnt}" for tok, cnt in reject_tally.most_common(5))
 
 
-def _summary(outcome, state, top_rejects=None):
+def _summary(outcome, state, top_rejects=None, extra=None):
     """One-line Telegram text for a run: the journalled outcome, the wheel
     stage and ticker of the state persisted (None when there is no state),
-    and top_rejects when the scan rejected everything."""
+    top_rejects when the scan rejected everything, and any extra tokens
+    (the covered-call scan's rejection / chain fetch errors)."""
     wheel = state["wheel"] if state is not None else {}
     text = (f"{outcome} stage={wheel.get('stage')} "
             f"ticker={wheel.get('ticker')}")
     if top_rejects:
         text += f" top_rejects=[{top_rejects}]"
+    for tok in extra or ():
+        text += f" {tok}"
     return text
+
+
+def _cc_proposal_line(row, is_open):
+    """One deterministic line: the proposed covered call's identity, its
+    basis and strike floor, the numbers that matter, and the market-open
+    flag."""
+    return (
+        f"propose_cc {row['underlying_symbol']} {row['contract_symbol']} "
+        f"strike={row['strike']:.2f} right=C expiry={row['expiration_date']} "
+        f"cost_basis={row['cost_basis']} "
+        f"strike_floor={row['strike_floor']:.2f} bid={row['bid']} "
+        f"oi={row['open_interest']} "
+        f"annualized_yield_pct={row['annualized_yield_pct']} "
+        f"market_open={is_open}"
+    )
 
 
 def _no_redirect(text):
@@ -116,19 +141,21 @@ def _no_redirect(text):
     return str(text).replace("<", "_").replace(">", "_")
 
 
-def _submit_gate(live, paper, action, proposal, is_open):
-    """Pure. None when place_csp may be called, else the reason it may not.
-    Every condition is an identity / equality test on exactly the value
-    required; anything else submits nothing."""
+def _submit_gate(live, paper, action, proposal, is_open,
+                 stable_action="noop:FLAT stable", pass_key="final_pass"):
+    """Pure. None when place_csp (defaults) / place_cc (stable_action
+    "noop:HOLDING stable", pass_key "all_pass") may be called, else the
+    reason it may not. Every condition is an identity / equality test on
+    exactly the value required; anything else submits nothing."""
     if live is not True:
         return "dry_run"
     if paper is not True:
         return "refused:not_paper"
-    if action != "noop:FLAT stable":
-        return "skip:not_flat_stable"
+    if action != stable_action:
+        return "skip:not_" + stable_action[len("noop:"):].lower().replace(" ", "_")
     if is_open is not True:
         return "skip:market_closed"
-    if not isinstance(proposal, dict) or proposal.get("final_pass") is not True:
+    if not isinstance(proposal, dict) or proposal.get(pass_key) is not True:
         return "skip:no_passing_proposal"
     return None
 
@@ -180,7 +207,8 @@ def run(live=False):
         from zoneinfo import ZoneInfo
 
         from credentials import load_credentials
-        from forgetrader.submit import place_csp
+        from forgetrader import cc_scan
+        from forgetrader.submit import place_cc, place_csp
 
         api_key, api_secret, paper = load_credentials()
 
@@ -255,6 +283,7 @@ def run(live=False):
         #    this run does not scan; the next run does).
         outcome = f"{mode}:{action}"
         top_rejects = None
+        alert_extra = []
         if action == "noop:FLAT stable":
             try:
                 result = wheel_dryrun.scan_watchlist(
@@ -324,16 +353,93 @@ def run(live=False):
                                    stage_to=fs.FLAT, action=gate, detail="")
                 print(f"LIVE {gate}")
                 outcome = f"{mode}:{gate}"
-        elif new_state["wheel"]["stage"] == fs.HOLDING:
+        # 8b. Stage 2: scan the held ticker's calls only on exactly
+        #    "noop:HOLDING stable" (a transition INTO HOLDING this run does
+        #    not scan; the next run does).
+        elif action == "noop:HOLDING stable":
+            ticker = new_state["wheel"]["ticker"]
+            basis = new_state["wheel"]["cost_basis"]
+            try:
+                scan = cc_scan.scan_calls(
+                    ticker, basis, trading_client, stock_client,
+                    option_client, policy, clock)
+            except WatchlistStructureError as e:
+                reason = f"watchlist_structure {e}"
+                fs.alert_stub(f"HALT {reason}")
+                fs.record_decision(conn, run_id, stage_from=fs.HOLDING,
+                                   stage_to=fs.HOLDING, action=f"HALT:{reason}",
+                                   detail="")
+                return _halt_exit(conn, run_id, new_state, f"HALT:{reason}",
+                                  mode)
+            is_open = getattr(clock, "is_open", None)
+            if scan.chain_fetch_errors:
+                errs = _no_redirect(" | ".join(scan.chain_fetch_errors))
+                fs.record_event(conn, run_id, "chain_fetch_error", symbol=ticker, detail=errs)
+                print(f"WARNING: chain_fetch_error {errs}", file=sys.stderr)
+                alert_extra.append(f"chain_fetch_errors=[{errs}]")
+            proposal = None
+            if scan.rejection is not None:
+                scan_action = f"cc_rejected:{scan.rejection}"
+                detail = (f"cc_rejected {ticker} reason={scan.rejection} "
+                          f"cost_basis={basis} market_open={is_open}")
+                print(f"WARNING: cc_rejected {ticker} {scan.rejection}",
+                      file=sys.stderr)
+                alert_extra.append(f"cc_rejected={scan.rejection}")
+            elif scan.candidates:
+                proposal = scan.candidates[0]  # already OI-desc sorted
+                scan_action = "propose_cc"
+                detail = _cc_proposal_line(proposal, is_open)
+            else:
+                scan_action = "cc_all_rejected"
+                top_rejects = _top_rejects(scan.reject_tally)
+                detail = (f"cc_all_rejected {ticker} cost_basis={basis} "
+                          f"evaluated={len(scan.all_rows)} "
+                          f"market_open={is_open} top_rejects=[{top_rejects}]")
+            # Exactly one decisions row for the scan outcome.
             fs.record_decision(conn, run_id, stage_from=fs.HOLDING,
-                               stage_to=fs.HOLDING,
-                               action="hold:stage2_not_built", detail=action)
-            print("WARNING: HOLDING - Stage 2 covered-call scan not built; "
-                  "wheel stalled", file=sys.stderr)
+                               stage_to=fs.HOLDING, action=scan_action,
+                               detail=detail)
+            print(f"SCAN {scan_action}")
+            print(f"  {detail}")
+
+            # 9b. Submit gate (the same function). Dry-run stops here.
+            gate = _submit_gate(live, paper, action, proposal, is_open,
+                                stable_action="noop:HOLDING stable",
+                                pass_key="all_pass")
+            if gate is None:
+                state_out, res = place_cc(
+                    trading_client, new_state, proposal, conn, run_id,
+                    ts.isoformat(), fs.STATE_PATH,
+                    otm_above_basis_pct=policy.get("calls", {}).get(
+                        "otm_above_basis_pct"))
+                new_state = state_out  # persisted on every outcome
+                coid = res["client_order_id"]
+                if res["outcome"] == "submitted":
+                    token = (f"submit:submitted status={res['status']} "
+                             f"coid={coid}")
+                elif res["outcome"] == "refused":
+                    token = f"submit:refused:{_no_redirect(res['detail'])}"
+                else:
+                    token = f"HALT:submit {_no_redirect(res['detail'])}"
+                fs.record_decision(
+                    conn, run_id, stage_from=fs.HOLDING,
+                    stage_to=new_state["wheel"]["stage"], action=token,
+                    detail=_no_redirect(json.dumps(res, sort_keys=True)))
+                if res["outcome"] == "halt":
+                    print(f"HALT submit {_no_redirect(res['detail'])} "
+                          f"coid={coid}", file=sys.stderr)
+                    return _halt_exit(conn, run_id, new_state, token, mode)
+                print(f"LIVE {token} broker_order_id={res['broker_order_id']}")
+                outcome = f"{mode}:{token}"
+            elif gate != "dry_run":
+                fs.record_decision(conn, run_id, stage_from=fs.HOLDING,
+                                   stage_to=fs.HOLDING, action=gate, detail="")
+                print(f"LIVE {gate}")
+                outcome = f"{mode}:{gate}"
 
         # 10. WRITE state (atomic), journal the run outcome, then alert.
         new_state["last_run"] = {"ts": fs._now_iso(), "outcome": outcome}
-        summary = _summary(outcome, new_state, top_rejects)
+        summary = _summary(outcome, new_state, top_rejects, alert_extra)
         fs.write_state(new_state)
         fs.record_run(conn, run_id, outcome)
         fs.record_event(conn, run_id, f"{mode}_complete", detail=action)
@@ -349,17 +455,18 @@ def main(argv=None):
     p = argparse.ArgumentParser(
         prog="forgetrader.run",
         description="Run-to-completion wheel path. Dry-run by default; "
-                    "--live may submit one paper CSP.",
+                    "--live may submit one paper CSP or covered call.",
     )
     g = p.add_mutually_exclusive_group()
     g.add_argument("--dry-run", dest="live", action="store_false",
                    help="read account, reconcile, scan, write state; never "
                         "submits (default)")
     g.add_argument("--live", dest="live", action="store_true",
-                   help="as --dry-run, then submit one CSP via place_csp only "
-                        "if paper is True, action is noop:FLAT stable, a "
-                        "proposal has final_pass True and the broker clock "
-                        "is_open is True; refuses (exit 3) unless paper")
+                   help="as --dry-run, then submit one CSP via place_csp "
+                        "(noop:FLAT stable) or one covered call via place_cc "
+                        "(noop:HOLDING stable) only if paper is True, the "
+                        "proposal passes and the broker clock is_open is "
+                        "True; refuses (exit 3) unless paper")
     p.set_defaults(live=False)
     args = p.parse_args(argv)
     return run(live=args.live)

@@ -5,7 +5,9 @@ reconcile_and_handle and REAL submit.place_csp. Patched seams:
 credentials.load_credentials (paper flag per scenario),
 fs.read_broker_financials (canned per scenario; kwargs + call count recorded),
 wheel_dryrun.scan_watchlist (AssertionError if called unless a scan is given;
-the clock kwarg it receives is recorded), fs.alert_stub (captured),
+the clock kwarg it receives is recorded), cc_scan.scan_calls (same idiom;
+B6: args + clock recorded), fs.reconcile_and_handle (only when a scenario
+overrides the action; the real one still runs first), fs.alert_stub (captured),
 alerts.send (captured, never the network; test_alerts.py passes its own),
 and the
 three alpaca client classes run.py builds (FakeTC / FakeData: every
@@ -25,8 +27,8 @@ Checked inside _drive for EVERY scenario (Brief 2):
      no stdout / stderr / outcome text has a redirect token followed by a path.
 
 Scenarios:
-  S1 Ford CSP_OPEN, put gone, 100 F      -> HOLDING + hold:stage2_not_built
-  S2 HOLDING stable                      -> noop:HOLDING stable + hold row
+  S1 Ford CSP_OPEN, put gone, 100 F      -> HOLDING, no covered-call scan (B6)
+  S2 HOLDING stable                      -> noop:HOLDING stable + propose_cc (B6)
   S3 FLAT seed, 100 F in broker          -> HALT:snapshot (unexpected position)
   S4 CSP_OPEN put open AND 100 F         -> reconcile HALT (not snapshot)
   S5 CSP_PENDING awaiting fill           -> tracked coid passed to the read
@@ -43,6 +45,18 @@ Brief 2 live scenarios (L*):
   L7 not_paper                           -> exit 3, zero broker calls
   L8 submit_order raises after write-ahead -> HALT:submit, CSP_PENDING kept
   L9 place_csp refuses (bid off 2dp)     -> refused, state untouched, exit 0
+Brief B6 HOLDING scenarios (H*), Stage 2 consumer:
+  H1 dry propose_cc, never submits (H1b: all live conditions but --dry-run)
+  H2 live submit -> CC_PENDING, ticker + cost_basis kept, exact request
+  H3 live skip market closed     H4 live skip no proposal (+ H4b all_pass "True")
+  H5 named rejection (dry + live) -> decision row + WARNING + alert, exit 0
+  H6 chain fetch error -> one event + WARNING + alert text
+  H7 live: transition into HOLDING does not scan or submit
+  H8 watchlist structure -> HALT:watchlist_structure exit 4
+  H9 CC_PENDING next runs keep cost_basis (awaiting fill, then fill)
+  H10 near-miss action "noop:HOLDING stable (x)" does not scan (dry + live)
+  H11 submit raises -> HALT:submit, CC_PENDING + cost_basis persisted
+  H12 place_cc refuses (bid off 2dp) -> refused, state untouched, exit 0
 The broker clock is faked on FakeTC.get_clock (Brief 13a.2).
 """
 
@@ -71,7 +85,8 @@ import credentials
 import forgetrader_state as fs
 import wheel_dryrun
 from alpaca.trading.enums import OrderStatus
-from forgetrader.run import _proposal_line, run
+from forgetrader import cc_scan as _cc_scan_mod
+from forgetrader.run import _cc_proposal_line, _proposal_line, run
 from watchlist import WatchlistStructureError
 
 _REAL_STATE = Path(fs.STATE_PATH)
@@ -93,6 +108,16 @@ LIVE_ROW = {"underlying_symbol": "NOK", "contract_symbol": LIVE_SYM,
             "strike": 7.5, "expiration_date": "2026-12-04", "bid": 0.16,
             "open_interest": 655, "annualized_yield_pct": 25.9556,
             "collateral": 750.0, "final_pass": True}
+# B6: a passing covered-call candidate row for the F HOLDING fixture (basis
+# 12.00, floor 13.20 at policy calls.otm_above_basis_pct 10): the keys
+# _cc_proposal_line reads plus the keys place_cc validates. The real producer
+# (cc_scan.scan_calls) feeding the real validator is proven in
+# test_place_cc.py (P9 seam).
+CC_SYM = "F261218C00013500"
+CC_ROW = {"underlying_symbol": "F", "contract_symbol": CC_SYM, "strike": 13.5,
+          "expiration_date": "2026-12-18", "cost_basis": 12.0,
+          "strike_floor": 13.2, "bid": 0.25, "ask": 0.3, "open_interest": 300,
+          "annualized_yield_pct": 17.3851, "all_pass": True}
 REDIRECT_RE = re.compile(r"(->|>|<)\s*/")
 PREFIXES = ("dryrun:", "live:")
 ALL_OUTCOMES = []  # (scenario, outcome) from every runs row and last_run
@@ -129,7 +154,7 @@ def _sha(p):
 
 def _drive(t, name, seed_state, financials, clock_ts=CLOCK_DEFAULT, scan=None,
            live=False, paper=True, is_open=False, submit_raises=None,
-           expect_clock=1, send=None):
+           expect_clock=1, send=None, cc_scan=None, reconcile_action=None):
     """Returns a dict of observations. Restores every patch in finally.
     Asserts the per-scenario T2 / T6 / T7 checks on `t` before returning."""
     tmp = Path(tempfile.mkdtemp(prefix="run_stages_"))
@@ -137,10 +162,12 @@ def _drive(t, name, seed_state, financials, clock_ts=CLOCK_DEFAULT, scan=None,
 
     orig = {k: getattr(fs, k) for k in (
         "STATE_PATH", "JOURNAL_PATH", "SCANS_DIR", "load_state", "write_state",
-        "journal_connect", "read_broker_financials", "alert_stub")}
+        "journal_connect", "read_broker_financials", "alert_stub",
+        "reconcile_and_handle")}
     orig_creds = credentials.load_credentials
     orig_send = alerts.send
     orig_scan = wheel_dryrun.scan_watchlist
+    orig_cc_scan = _cc_scan_mod.scan_calls
     orig_clients = (_alp_trading.TradingClient, _alp_stock.StockHistoricalDataClient,
                     _alp_option.OptionHistoricalDataClient)
     ol, ow, oj = orig["load_state"], orig["write_state"], orig["journal_connect"]
@@ -149,7 +176,9 @@ def _drive(t, name, seed_state, financials, clock_ts=CLOCK_DEFAULT, scan=None,
            "scan_called": False, "clock_calls": 0,
            "tmp_state": tmp_state, "tmp_scans": tmp_scans, "clients_built": 0,
            "broker_calls": [], "submit_calls": [], "clock_obj": None,
-           "scan_clock": "NOT_CALLED", "disk_at_submit": None}
+           "scan_clock": "NOT_CALLED", "disk_at_submit": None,
+           "cc_scan_called": False, "cc_scan_args": None,
+           "cc_scan_clock": "NOT_CALLED"}
 
     def fake_fin(trading_client=None, tracked_client_order_id=None):
         obs["fin_calls"].append({"tracked_client_order_id": tracked_client_order_id})
@@ -165,6 +194,18 @@ def _drive(t, name, seed_state, financials, clock_ts=CLOCK_DEFAULT, scan=None,
         if scan is None:
             raise AssertionError("scan_watchlist must not be called in this scenario")
         return scan(*a, **k)
+
+    def fake_cc_scan(*a, **k):
+        obs["cc_scan_called"] = True
+        obs["cc_scan_args"] = a[:2]
+        obs["cc_scan_clock"] = a[6] if len(a) > 6 else k.get("clock", "NOT_PASSED")
+        if cc_scan is None:
+            raise AssertionError("scan_calls must not be called in this scenario")
+        return cc_scan(*a, **k)
+
+    def fake_reconcile(*a, **k):
+        new_state, _action = orig["reconcile_and_handle"](*a, **k)
+        return new_state, reconcile_action
 
     class FakeOrder:
         def __init__(self):
@@ -211,6 +252,9 @@ def _drive(t, name, seed_state, financials, clock_ts=CLOCK_DEFAULT, scan=None,
         credentials.load_credentials = fake_creds
         alerts.send = send if send is not None else obs["sent"].append
         wheel_dryrun.scan_watchlist = fake_scan
+        _cc_scan_mod.scan_calls = fake_cc_scan
+        if reconcile_action is not None:
+            fs.reconcile_and_handle = fake_reconcile
         _alp_trading.TradingClient = FakeTC
         _alp_stock.StockHistoricalDataClient = FakeData
         _alp_option.OptionHistoricalDataClient = FakeData
@@ -242,6 +286,7 @@ def _drive(t, name, seed_state, financials, clock_ts=CLOCK_DEFAULT, scan=None,
         credentials.load_credentials = orig_creds
         alerts.send = orig_send
         wheel_dryrun.scan_watchlist = orig_scan
+        _cc_scan_mod.scan_calls = orig_cc_scan
         (_alp_trading.TradingClient, _alp_stock.StockHistoricalDataClient,
          _alp_option.OptionHistoricalDataClient) = orig_clients
 
@@ -255,6 +300,9 @@ def _drive(t, name, seed_state, financials, clock_ts=CLOCK_DEFAULT, scan=None,
     if obs["scan_called"]:
         t.ok(obs["scan_clock"] is obs["clock_obj"] and obs["clock_obj"] is not None,
              f"{name} T6 scan clock {obs['scan_clock']!r} is not the run clock")
+    if obs["cc_scan_called"]:
+        t.ok(obs["cc_scan_clock"] is obs["clock_obj"] and obs["clock_obj"] is not None,
+             f"{name} T6 cc scan clock {obs['cc_scan_clock']!r} is not the run clock")
     # T7 mode prefix on every outcome + no redirect-shaped token before a path.
     outs = [r["outcome"] for r in obs["runs"]]
     if obs["state"] is not None and "last_run" in obs["state"] and obs["state_sha"] != obs["seed_sha"]:
@@ -284,6 +332,18 @@ def _scan_result(wl_rejected, passing_rows=()):
         wl_rejected=wl_rejected, clock=types.SimpleNamespace(is_open=False))
 
 
+def _cc_result(candidates=(), rejection=None, chain_fetch_errors=(), tally=None):
+    return types.SimpleNamespace(
+        ticker="F", cost_basis=12.0, candidates=list(candidates),
+        all_rows=list(candidates), reject_tally=tally or Counter(),
+        rejection=rejection, chain_fetch_errors=list(chain_fetch_errors),
+        wl_rejected=[], wl_warnings=[])
+
+
+def _cc_empty(*a, **k):
+    return _cc_result()
+
+
 def _wl_events(o):
     return [e for e in o["events"] if e["event_type"] == "watchlist_rejected"]
 
@@ -298,28 +358,32 @@ def main():
               sorted(os.listdir(_REAL_SCANS)) if _REAL_SCANS.exists() else None)
 
     # S1 -------------------------------------------------------------------
-    o = _drive(t, "S1", _state(fs.CSP_OPEN, PUT, COID), _fin([_pos("F", 100)]))
+    # B6: a transition INTO HOLDING does not scan for calls that run.
+    o = _drive(t, "S1", _state(fs.CSP_OPEN, PUT, COID), _fin([_pos("F", 100)]),
+               cc_scan=_cc_empty)
     t.ok(o["ret"] == 0, f"S1 exit {o['ret']!r} != 0")
     t.ok(o["state"]["wheel"]["stage"] == fs.HOLDING, "S1 stage not HOLDING")
     acts = [d["action"] for d in o["decisions"]]
-    t.ok(acts == [f"{fs.CSP_OPEN}->{fs.HOLDING} (assigned)",
-                    "hold:stage2_not_built"],
+    t.ok(acts == [f"{fs.CSP_OPEN}->{fs.HOLDING} (assigned)"],
          f"S1 decisions {acts!r}")
-    t.ok("WARNING: HOLDING" in o["stderr"], "S1 stderr missing WARNING")
+    t.ok(o["state"]["wheel"]["cost_basis"] == 12.0,
+         f"S1 cost_basis {o['state']['wheel']['cost_basis']!r}")
+    t.ok("WARNING" not in o["stderr"], f"S1 stderr {o['stderr']!r}")
     t.ok(not o["scan_called"], "S1 scan called")
+    t.ok(not o["cc_scan_called"], "S1 cc scan called on a transition into HOLDING")
     t.ok(o["fin_calls"] == [{"tracked_client_order_id": None}],
          f"S1 fin kwargs {o['fin_calls']!r}")
     t.ok(_money(o["state"]) == CANNED_MONEY, f"S1 money {_money(o['state'])!r}")
 
     # S2 -------------------------------------------------------------------
-    o = _drive(t, "S2", _state(fs.HOLDING, None, None), _fin([_pos("F", 100)]))
+    o = _drive(t, "S2", _state(fs.HOLDING, None, None), _fin([_pos("F", 100)]),
+               cc_scan=lambda *a, **k: _cc_result([CC_ROW]))
     t.ok(o["ret"] == 0, f"S2 exit {o['ret']!r} != 0")
     acts = [d["action"] for d in o["decisions"]]
-    t.ok(acts == ["noop:HOLDING stable", "hold:stage2_not_built"],
-         f"S2 decisions {acts!r}")
-    t.ok(o["decisions"][-1]["detail"] == "noop:HOLDING stable", "S2 hold detail")
+    t.ok(acts == ["noop:HOLDING stable", "propose_cc"], f"S2 decisions {acts!r}")
     t.ok(o["runs"] == [{"outcome": "dryrun:noop:HOLDING stable"}], f"S2 runs {o['runs']!r}")
-    t.ok(not o["scan_called"], "S2 scan called")
+    t.ok(not o["scan_called"], "S2 FLAT scan called")
+    t.ok(o["cc_scan_called"], "S2 cc scan not called at HOLDING stable")
 
     # S3 -------------------------------------------------------------------
     s3 = _state(fs.FLAT)
@@ -593,6 +657,195 @@ def main():
     t.ok(o["state"]["wheel"] == fs.fresh_flat_state()["wheel"], f"L9 wheel {o['state']['wheel']!r}")
     t.ok(o["orders"] == [], f"L9 orders {o['orders']!r}")
 
+    # Brief B6 HOLDING scenarios ------------------------------------------
+    HOLD = _state(fs.HOLDING, None, None)          # F, cost_basis 12.0
+    HOLD_FIN = _fin([_pos("F", 100)])
+    HOLD_WHEEL = HOLD["wheel"]
+    CC_LIVE = dict(live=True, paper=True, is_open=True, clock_ts=CLOCK_OPEN,
+                   cc_scan=lambda *a, **k: _cc_result([CC_ROW]))
+
+    # H1 dry propose: decision row + printed line, never submits.
+    o = _drive(t, "H1", HOLD, HOLD_FIN, cc_scan=lambda *a, **k: _cc_result([CC_ROW]))
+    t.ok(o["ret"] == 0, f"H1 exit {o['ret']!r}")
+    t.ok(o["cc_scan_args"] == ("F", 12.0), f"H1 scan args {o['cc_scan_args']!r}")
+    rows = [d for d in o["decisions"] if d["action"] == "propose_cc"]
+    t.ok(len(rows) == 1 and rows[0]["detail"] == _cc_proposal_line(CC_ROW, False)
+         and rows[0]["stage_from"] == rows[0]["stage_to"] == fs.HOLDING,
+         f"H1 decisions {o['decisions']!r}")
+    t.ok(f"SCAN propose_cc\n  {_cc_proposal_line(CC_ROW, False)}\n" in o["stdout"],
+         "H1 printed line != journalled detail")
+    t.ok(o["runs"] == [{"outcome": "dryrun:noop:HOLDING stable"}], f"H1 runs {o['runs']!r}")
+    t.ok(o["state"]["wheel"] == HOLD_WHEEL, f"H1 wheel changed {o['state']['wheel']!r}")
+    t.ok(o["orders"] == [] and "LIVE " not in o["stdout"], "H1 order row / LIVE line in dry-run")
+    t.ok(o["sent"] == ["dryrun:noop:HOLDING stable stage=HOLDING ticker=F"],
+         f"H1 alert {o['sent']!r}")
+
+    o = _drive(t, "H1b", HOLD, HOLD_FIN, **dict(CC_LIVE, live=False))
+    t.ok(o["ret"] == 0 and o["submit_calls"] == [], f"H1b dry with market open ret={o['ret']!r}")
+    t.ok(o["runs"] == [{"outcome": "dryrun:noop:HOLDING stable"}], f"H1b runs {o['runs']!r}")
+
+    # H2 live submit: exactly one order, CC_PENDING keeps ticker + cost_basis.
+    o = _drive(t, "H2", HOLD, HOLD_FIN, **CC_LIVE)
+    t.ok(o["ret"] == 0, f"H2 exit {o['ret']!r} != 0")
+    t.ok(len(o["submit_calls"]) == 1, f"H2 submit calls {len(o['submit_calls'])} != 1")
+    req = o["submit_calls"][0] if o["submit_calls"] else None
+    coid = getattr(req, "client_order_id", None)
+    t.ok(req is not None and req.symbol == CC_SYM and req.qty == 1,
+         f"H2 request symbol/qty {req!r}")
+    t.ok(req is not None and req.limit_price == 0.25, f"H2 limit {getattr(req, 'limit_price', None)!r} != bid")
+    t.ok(req is not None and getattr(req.side, "value", None) == "sell"
+         and getattr(req.time_in_force, "value", None) == "day"
+         and getattr(req.type, "value", None) == "limit", f"H2 side/tif/type {req!r}")
+    w = o["state"]["wheel"]
+    t.ok(w["stage"] == fs.CC_PENDING, f"H2 persisted stage {w['stage']!r}")
+    t.ok(w["client_order_id"] == coid and coid is not None
+         and w["contract_symbol"] == CC_SYM, f"H2 persisted coid/contract {w!r}")
+    t.ok(w["ticker"] == "F" and w["cost_basis"] == 12.0,
+         f"H2 ticker/cost_basis not kept {w!r}")
+    t.ok(w["opened_at"] == CLOCK_OPEN.isoformat(), f"H2 opened_at {w['opened_at']!r}")
+    das = o["disk_at_submit"]
+    t.ok(das is not None and das["wheel"]["stage"] == fs.CC_PENDING
+         and das["wheel"]["client_order_id"] == coid
+         and das["wheel"]["cost_basis"] == 12.0, f"H2 write-ahead {das!r}")
+    t.ok(das is not None and _money(das) == CANNED_MONEY,
+         f"H2 write-ahead money {das and _money(das)!r}")
+    tok = f"live:submit:submitted status=accepted coid={coid}"
+    t.ok(o["runs"] == [{"outcome": tok}], f"H2 runs {o['runs']!r}")
+    t.ok(f"LIVE submit:submitted status=accepted coid={coid}" in o["stdout"],
+         f"H2 stdout {o['stdout']!r}")
+    t.ok([r["status"] for r in o["orders"]] == [None, "accepted"]
+         and all(r["client_order_id"] == coid for r in o["orders"]),
+         f"H2 orders rows {o['orders']!r}")
+    sub_rows = [d for d in o["decisions"] if d["action"].startswith("submit:")]
+    t.ok(len(sub_rows) == 1 and sub_rows[0]["stage_from"] == fs.HOLDING
+         and sub_rows[0]["stage_to"] == fs.CC_PENDING, f"H2 submit decision {sub_rows!r}")
+    t.ok(o["sent"] == [f"{tok} stage=CC_PENDING ticker=F"], f"H2 alert {o['sent']!r}")
+
+    # H3 live, market closed: no submit.
+    o = _drive(t, "H3", HOLD, HOLD_FIN, **dict(CC_LIVE, is_open=False))
+    t.ok(o["ret"] == 0 and o["submit_calls"] == [], f"H3 market closed ret={o['ret']!r}")
+    t.ok(o["runs"] == [{"outcome": "live:skip:market_closed"}], f"H3 runs {o['runs']!r}")
+    t.ok("LIVE skip:market_closed" in o["stdout"], "H3 stdout missing skip line")
+    t.ok(o["state"]["wheel"] == HOLD_WHEEL, "H3 wheel changed")
+
+    # H4 live, no passing proposal: no submit; alert carries top_rejects.
+    tally = Counter({"strike_below_basis_floor": 3, "dte": 1})
+    o = _drive(t, "H4", HOLD, HOLD_FIN,
+               **dict(CC_LIVE, cc_scan=lambda *a, **k: _cc_result(tally=tally)))
+    t.ok(o["ret"] == 0 and o["submit_calls"] == [], f"H4 no proposal ret={o['ret']!r}")
+    t.ok([d["action"] for d in o["decisions"]] ==
+         ["noop:HOLDING stable", "cc_all_rejected", "skip:no_passing_proposal"],
+         f"H4 decisions {o['decisions']!r}")
+    t.ok(o["runs"] == [{"outcome": "live:skip:no_passing_proposal"}], f"H4 runs {o['runs']!r}")
+    t.ok(o["sent"] == ["live:skip:no_passing_proposal stage=HOLDING ticker=F "
+                       "top_rejects=[strike_below_basis_floor=3, dte=1]"],
+         f"H4 alert {o['sent']!r}")
+    t.ok(o["state"]["wheel"] == HOLD_WHEEL, "H4 wheel changed")
+
+    o = _drive(t, "H4b", HOLD, HOLD_FIN, **dict(
+        CC_LIVE, cc_scan=lambda *a, **k: _cc_result([dict(CC_ROW, all_pass="True")])))
+    t.ok(o["ret"] == 0 and o["submit_calls"] == [], f"H4b all_pass 'True' submitted")
+    t.ok(o["runs"] == [{"outcome": "live:skip:no_passing_proposal"}], f"H4b runs {o['runs']!r}")
+
+    # H5 named rejection: decision row + stderr WARNING + alert, exit 0, no HALT.
+    rej = lambda *a, **k: _cc_result(rejection="earnings_lapsed")
+    o = _drive(t, "H5", HOLD, HOLD_FIN, cc_scan=rej)
+    t.ok(o["ret"] == 0, f"H5 exit {o['ret']!r}")
+    t.ok([d["action"] for d in o["decisions"]] ==
+         ["noop:HOLDING stable", "cc_rejected:earnings_lapsed"], f"H5 decisions {o['decisions']!r}")
+    t.ok("WARNING: cc_rejected F earnings_lapsed" in o["stderr"], f"H5 stderr {o['stderr']!r}")
+    t.ok(o["sent"] == ["dryrun:noop:HOLDING stable stage=HOLDING ticker=F "
+                       "cc_rejected=earnings_lapsed"], f"H5 alert {o['sent']!r}")
+    t.ok(o["alerts"] == [] and o["halt_dumps"] == [], f"H5 HALT path taken {o['alerts']!r}")
+    t.ok(o["runs"] == [{"outcome": "dryrun:noop:HOLDING stable"}], f"H5 runs {o['runs']!r}")
+    o = _drive(t, "H5L", HOLD, HOLD_FIN, **dict(CC_LIVE, cc_scan=rej))
+    t.ok(o["ret"] == 0 and o["submit_calls"] == [], f"H5L ret={o['ret']!r}")
+    t.ok(o["sent"] == ["live:skip:no_passing_proposal stage=HOLDING ticker=F "
+                       "cc_rejected=earnings_lapsed"], f"H5L alert {o['sent']!r}")
+
+    # H6 chain fetch error: one event + stderr WARNING + alert text, no stall.
+    msg = "get_option_chain FAILED for F: RuntimeError: boom"
+    o = _drive(t, "H6", HOLD, HOLD_FIN,
+               cc_scan=lambda *a, **k: _cc_result(chain_fetch_errors=[msg]))
+    t.ok(o["ret"] == 0, f"H6 exit {o['ret']!r}")
+    t.ok([e["detail"] for e in o["events"] if e["event_type"] == "chain_fetch_error"]
+         == [msg], f"H6 events {o['events']!r}")
+    t.ok(f"WARNING: chain_fetch_error {msg}" in o["stderr"], f"H6 stderr {o['stderr']!r}")
+    t.ok(len(o["sent"]) == 1 and f"chain_fetch_errors=[{msg}]" in o["sent"][0],
+         f"H6 alert {o['sent']!r}")
+    t.ok([d["action"] for d in o["decisions"]] == ["noop:HOLDING stable", "cc_all_rejected"],
+         f"H6 decisions {o['decisions']!r}")
+    o = _drive(t, "H6b", HOLD, HOLD_FIN, cc_scan=_cc_empty)
+    t.ok([e["event_type"] for e in o["events"]] == ["dryrun_complete"],
+         f"H6b events without a fetch error {o['events']!r}")
+
+    # H7 live: a transition INTO HOLDING neither scans nor submits.
+    o = _drive(t, "H7", _state(fs.CSP_OPEN, PUT, COID), _fin([_pos("F", 100)]), **CC_LIVE)
+    t.ok(o["ret"] == 0 and o["submit_calls"] == [], f"H7 ret={o['ret']!r}")
+    t.ok(not o["cc_scan_called"], "H7 cc scan called on a transition into HOLDING")
+    t.ok(o["runs"] == [{"outcome": "live:CSP_OPEN->HOLDING (assigned)"}], f"H7 runs {o['runs']!r}")
+
+    # H8 watchlist structure -> HALT exit 4, as the CSP path.
+    def bad_wl(*a, **k):
+        raise WatchlistStructureError("bad")
+
+    o = _drive(t, "H8", HOLD, HOLD_FIN, cc_scan=bad_wl)
+    t.ok(o["ret"] == 4, f"H8 exit {o['ret']!r} != 4")
+    t.ok([d["action"] for d in o["decisions"]] ==
+         ["noop:HOLDING stable", "HALT:watchlist_structure bad"], f"H8 decisions {o['decisions']!r}")
+    t.ok(o["runs"] == [{"outcome": "dryrun:HALT:watchlist_structure bad"}], f"H8 runs {o['runs']!r}")
+    t.ok(o["alerts"] == ["HALT watchlist_structure bad"], f"H8 alerts {o['alerts']!r}")
+    t.ok(o["sent"] == ["dryrun:HALT:watchlist_structure bad stage=HOLDING ticker=F"],
+         f"H8 sent {o['sent']!r}")
+    t.ok(o["state"]["wheel"] == HOLD_WHEEL, "H8 wheel changed")
+
+    # H9 next runs at CC_PENDING keep cost_basis (awaiting fill, then fill).
+    pend = _state(fs.CC_PENDING, CC_SYM, COID)
+    order = {"id": "oid-cc", "client_order_id": COID, "symbol": CC_SYM, "status": "new"}
+    o = _drive(t, "H9", pend, _fin([_pos("F", 100)], [order], tracked="new"))
+    t.ok(o["ret"] == 0 and [d["action"] for d in o["decisions"]] ==
+         ["noop:CC_PENDING awaiting fill"], f"H9 decisions {o['decisions']!r}")
+    t.ok(o["fin_calls"] == [{"tracked_client_order_id": COID}], f"H9 fin {o['fin_calls']!r}")
+    t.ok(o["state"]["wheel"]["cost_basis"] == 12.0 and o["state"]["wheel"]["ticker"] == "F",
+         f"H9 wheel {o['state']['wheel']!r}")
+    o = _drive(t, "H9f", pend, _fin([_pos("F", 100), _pos(CC_SYM, -1)], tracked="filled"))
+    t.ok(o["ret"] == 0 and o["state"]["wheel"]["stage"] == fs.CC_OPEN
+         and o["state"]["wheel"]["cost_basis"] == 12.0, f"H9f wheel {o['state']['wheel']!r}")
+
+    # H10 near-miss action: only the exact "noop:HOLDING stable" scans.
+    o = _drive(t, "H10", HOLD, HOLD_FIN, reconcile_action="noop:HOLDING stable (x)",
+               cc_scan=lambda *a, **k: _cc_result([CC_ROW]))
+    t.ok(not o["cc_scan_called"], "H10 cc scan called on a near-miss action")
+    t.ok([d["action"] for d in o["decisions"]] == ["noop:HOLDING stable"],
+         f"H10 decisions {o['decisions']!r}")
+    o = _drive(t, "H10L", HOLD, HOLD_FIN, reconcile_action="noop:HOLDING stable (x)", **CC_LIVE)
+    t.ok(not o["cc_scan_called"] and o["submit_calls"] == [],
+         "H10L near-miss action scanned or submitted")
+    t.ok(o["runs"] == [{"outcome": "live:noop:HOLDING stable (x)"}], f"H10L runs {o['runs']!r}")
+
+    # H11 submit raises after the write-ahead: HALT:submit, CC_PENDING kept.
+    o = _drive(t, "H11", HOLD, HOLD_FIN,
+               **dict(CC_LIVE, submit_raises=RuntimeError("wire down")))
+    t.ok(o["ret"] == 4 and len(o["submit_calls"]) == 1, f"H11 ret={o['ret']!r}")
+    coid = getattr(o["submit_calls"][0], "client_order_id", None) if o["submit_calls"] else None
+    w = o["state"]["wheel"]
+    t.ok(w["stage"] == fs.CC_PENDING, f"H11 persisted stage {w['stage']!r}")
+    t.ok(w["client_order_id"] == coid and coid is not None and w["cost_basis"] == 12.0,
+         f"H11 persisted wheel {w!r}")
+    t.ok(len(o["runs"]) == 1 and o["runs"][0]["outcome"].startswith(
+        "live:HALT:submit RuntimeError: wire down"), f"H11 runs {o['runs']!r}")
+    t.ok("HALT submit" in o["stderr"], f"H11 stderr {o['stderr']!r}")
+    t.ok(any(a.startswith("HALT:submit") for a in o["alerts"]), f"H11 alerts {o['alerts']!r}")
+    t.ok(len(o["sent"]) == 1 and o["sent"][0].startswith("live:HALT:submit RuntimeError"),
+         f"H11 sent {o['sent']!r}")
+
+    # H12 place_cc refuses: refused token, state untouched, exit 0.
+    o = _drive(t, "H12", HOLD, HOLD_FIN, **dict(
+        CC_LIVE, cc_scan=lambda *a, **k: _cc_result([dict(CC_ROW, bid=0.255)])))
+    t.ok(o["ret"] == 0 and o["submit_calls"] == [], f"H12 ret={o['ret']!r}")
+    t.ok(o["runs"] == [{"outcome": "live:submit:refused:bid_not_2dp"}], f"H12 runs {o['runs']!r}")
+    t.ok(o["state"]["wheel"] == HOLD_WHEEL and o["orders"] == [], f"H12 wheel {o['state']['wheel']!r}")
+
     # T7 aggregate: every outcome of every scenario carries a mode prefix.
     bad = [(n, x) for n, x in ALL_OUTCOMES if not x.startswith(PREFIXES)]
     print(f"T7 outcomes checked={len(ALL_OUTCOMES)} unprefixed={bad!r}")
@@ -612,7 +865,7 @@ def main():
         print(f"FAIL: {len(t.failures)} failed of {t.n} assertions")
         return 1
     print(f"PASS: 11 scenarios + 4 wl_rejected scenarios + 12 live scenarios "
-          f"+ 1 isolation guard, {t.n} assertions")
+          f"+ 18 HOLDING scenarios + 1 isolation guard, {t.n} assertions")
     return 0
 
 

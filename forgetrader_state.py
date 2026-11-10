@@ -140,6 +140,8 @@ def _put_strike_basis(contract):
     field / 1000 parsed via Decimal and stored as a float (the schema's
     numeric fields are JSON floats, see _safe_float); or (None, reason) when
     the symbol is missing, unparseable or not a put. Never raises."""
+    if not isinstance(contract, str) or not contract[-8:].isdigit():
+        return None, f"cannot parse strike from contract_symbol {contract!r}"
     if _contract_expiry(contract) is None:
         return None, f"cannot parse strike from contract_symbol {contract!r}"
     if contract[-9] != "P":

@@ -244,6 +244,27 @@ def part_c():
         got = _submit_gate(**dict(ok, **patch))
         check(got == want, f"C {label}: got {got!r} want {want!r}")
 
+    # B6: the same gate for place_cc (HOLDING stable, candidate all_pass).
+    cc = {"all_pass": True, "contract_symbol": "NOK261218C00028000"}
+    hok = dict(ok, action="noop:HOLDING stable", proposal=cc,
+               stable_action="noop:HOLDING stable", pass_key="all_pass")
+    check(_submit_gate(**hok) is None, f"C HOLDING all true: {_submit_gate(**hok)!r}")
+    hcases = [
+        ("HOLDING action FLAT", {"action": "noop:FLAT stable"}, "skip:not_holding_stable"),
+        ("HOLDING transition", {"action": "CSP_OPEN->HOLDING (assigned)"},
+         "skip:not_holding_stable"),
+        ("HOLDING is_open False", {"is_open": False}, "skip:market_closed"),
+        ("HOLDING final_pass only", {"proposal": {"final_pass": True}},
+         "skip:no_passing_proposal"),
+        ("HOLDING all_pass 'True'", {"proposal": dict(cc, all_pass="True")},
+         "skip:no_passing_proposal"),
+        ("HOLDING live False", {"live": False}, "dry_run"),
+        ("HOLDING paper False", {"paper": False}, "refused:not_paper"),
+    ]
+    for label, patch, want in hcases:
+        got = _submit_gate(**dict(hok, **patch))
+        check(got == want, f"C {label}: got {got!r} want {want!r}")
+
 
 def main():
     before = [sha(p) for p in REAL_FILES]

@@ -198,7 +198,7 @@ def part_r():
     # R1 summary after state write + run row, one message
     box = []
     with env():
-        o, sink = drive_run("R1", hold, hold_fin, box)
+        o, sink = drive_run("R1", hold, hold_fin, box, cc_scan=trs._cc_empty)
     check(o is not None and o["ret"] == 0, "R1 exit not 0")
     check(len(box) == 1, f"R1 sends {len(box)} != 1")
     check(bool(box) and all(b["text"] == f"[forgetrader] {ok_out} stage=HOLDING ticker=F"
@@ -278,7 +278,7 @@ def part_r():
     # R6 no token: WARNING, no send, run unchanged
     box = []
     with env(token=None):
-        o, sink = drive_run("R6", hold, hold_fin, box)
+        o, sink = drive_run("R6", hold, hold_fin, box, cc_scan=trs._cc_empty)
     check(o is not None and o["ret"] == 0, "R6 exit not 0")
     check(box == [], "R6 transport called without a token")
     check(o is not None and o["stderr"].count("WARNING: alert skipped") == 1,
@@ -289,7 +289,7 @@ def part_r():
     # R7 transport raises: swallowed, type-only WARNING, run unchanged
     box = []
     with env():
-        o, sink = drive_run("R7", hold, hold_fin, box,
+        o, sink = drive_run("R7", hold, hold_fin, box, cc_scan=trs._cc_empty,
                             raises=RuntimeError(f"net down {URL}"))
     check(o is not None and o["ret"] == 0, "R7 exit not 0 (alert failure leaked)")
     check(o is not None and "WARNING: alert not sent: RuntimeError\n" in o["stderr"],
