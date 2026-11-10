@@ -108,7 +108,7 @@ class Env:
 
     def proposal(self, **kw):
         p = {"contract_symbol": ABOVE, "underlying_symbol": "NOK",
-             "bid": 0.50, "cost_basis": BASIS, "all_pass": True}
+             "bid": 0.50, "ask": 0.55, "cost_basis": BASIS, "all_pass": True}
         p.update(kw)
         return p
 
