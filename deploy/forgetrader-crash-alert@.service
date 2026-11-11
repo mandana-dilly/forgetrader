@@ -1,0 +1,7 @@
+[Unit]
+Description=ForgeTrader crash alert for %i (B7)
+
+[Service]
+Type=oneshot
+UMask=0077
+ExecStart=/usr/bin/python3 -I %h/forgetrader/deploy/crash_alert.py %h/forgetrader/.env %i

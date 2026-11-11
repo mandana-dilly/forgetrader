@@ -1,5 +1,6 @@
 [Unit]
 Description=ForgeTrader live run (paper only until Phase W, D27)
+OnFailure=forgetrader-crash-alert@%n.service
 
 [Service]
 Type=oneshot

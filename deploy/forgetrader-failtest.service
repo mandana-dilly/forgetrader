@@ -1,0 +1,7 @@
+[Unit]
+Description=ForgeTrader crash alert end-to-end test, always fails (B7)
+OnFailure=forgetrader-crash-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/false
