@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# keyprobe.sh - proves user forgedev cannot read or find the Alpaca keys.
+# keyprobe.sh - proves user forgedev cannot read or find the Alpaca keys and Telegram token.
 # Run as forge: cd / && sudo -v && bash ~/forgetrader/deploy/keyprobe.sh
 # Reads .env into a pipe only. Prints lengths, verdicts and filenames, never a key.
 # NEVER run with bash -x.
@@ -12,13 +12,13 @@ MARK="CANARY-NOT-""A-KEY"
 keys() { /home/forge/forgetrader/.venv/bin/python -c "
 from dotenv import dotenv_values
 v = dotenv_values('$ENV')
-for k in ('ALPACA_API_KEY', 'ALPACA_API_SECRET'):
+for k in ('ALPACA_API_KEY', 'ALPACA_API_SECRET', 'TELEGRAM_BOT_TOKEN'):
     print(v.get(k) or '')
 "; }
-echo "--- 0 key patterns (lengths only, expect 2 non-zero)"
+echo "--- 0 key patterns (lengths only, expect 3 non-zero)"
 keys | awk '{print "pattern " NR " length " length($0)}'
 np=$(keys | grep -c .)
-[ "$np" -eq 2 ] || { echo "ABORT: $np non-empty key patterns, expected 2 (FAIL)"; exit 1; }
+[ "$np" -eq 3 ] || { echo "ABORT: $np non-empty key patterns, expected 3 (FAIL)"; exit 1; }
 echo "--- 1 canary beside .env (same owner and mode), decoy in drop folder"
 [ -f "$CANARY" ] || { printf '%s\n' "$MARK" >| "$CANARY"; chmod 600 "$CANARY"; }
 [ -f "$DECOY" ] || { printf '%s\n' "$MARK" >| "$DECOY"; chmod 644 "$DECOY"; }
@@ -32,7 +32,7 @@ n=0; r=0
 for p in $(pgrep -u forge); do n=$((n+1)); sudo -u forgedev test -r "/proc/$p/environ" && r=$((r+1)); done
 echo "forge processes: $n, environ readable by forgedev: $r"
 echo "--- 4 forgedev environment"
-echo "ALPACA_ vars in forgedev env: $(sudo -u forgedev -H env | grep -c '^ALPACA_')"
+echo "ALPACA_/TELEGRAM_ vars in forgedev env: $(sudo -u forgedev -H env | grep -cE '^(ALPACA_|TELEGRAM_)')"
 echo "--- 5 privilege"
 sudo -u forgedev sudo -n true >/dev/null 2>&1 && echo "sudo: ALLOWED (FAIL)" || echo "sudo: BLOCKED"
 sudo -u forgedev test -w /var/run/docker.sock && echo "docker socket: WRITABLE (FAIL)" || echo "docker socket: BLOCKED"
