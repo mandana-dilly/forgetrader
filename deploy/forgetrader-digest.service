@@ -1,0 +1,9 @@
+[Unit]
+Description=ForgeTrader daily digest, read-only (D38)
+OnFailure=forgetrader-crash-alert@%n.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/forgetrader
+UMask=0077
+ExecStart=%h/forgetrader/.venv/bin/python -m forgetrader.report digest --send %h/forgetrader

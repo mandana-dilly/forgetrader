@@ -1,0 +1,9 @@
+[Unit]
+Description=ForgeTrader daily digest, 16:30 ET weekdays (D38)
+
+[Timer]
+OnCalendar=Mon..Fri 16:30 America/New_York
+Persistent=false
+
+[Install]
+WantedBy=timers.target

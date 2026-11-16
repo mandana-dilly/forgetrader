@@ -7,3 +7,4 @@ scans/
 state.json
 journal.db
 canary.secret
+PROJECT_STATE.md
