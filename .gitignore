@@ -8,3 +8,4 @@ state.json
 journal.db
 canary.secret
 PROJECT_STATE.md
+scouts_facts.db
