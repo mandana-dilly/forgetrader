@@ -5,11 +5,13 @@
 # worktree at that exact SHA runs all suites and the FI scripts this branch adds or changes,
 # then prints log, stat and full diff of main...SHA. Records the SHA only on PASS.
 # Never executes branch code as forge. Never run with bash -x.
+# Each branch gets its own forgedev worktree ~/verify-BRANCH, so parallel waiters never share one.
+# FT_FORGE_REPO / FT_FROMDEV / FT_SUDO are for tests only; production never sets them.
 set -euo pipefail
 B=${1:?usage: verify.sh BRANCH}
 [[ $B =~ ^[A-Za-z0-9._-]+$ ]] || { echo "REFUSED: bad branch name"; exit 2; }
-BUNDLE=/srv/forgedrop/from-dev/$B.bundle
-cd /home/forge/forgetrader
+BUNDLE=${FT_FROMDEV:-/srv/forgedrop/from-dev}/$B.bundle
+cd "${FT_FORGE_REPO:-/home/forge/forgetrader}"
 git bundle verify -q "$BUNDLE"
 git fetch -q --no-tags "$BUNDLE" "+$B:refs/dev/$B"
 SHA=$(git rev-parse "refs/dev/$B")
@@ -21,15 +23,15 @@ FI=$(git diff --name-only --diff-filter=AM "main...$SHA" -- 'tests/fi/*.sh' | tr
 echo "=== FI scripts in branch: ${FI:-none}"
 echo "=== as forgedev"
 set +e
-sudo -u forgedev -H bash -c '
+${FT_SUDO:-sudo -u forgedev -H} bash -c '
 set -u
-S=$1; shift
+B=$1; S=$2; shift 2
 cd ~/forgetrader || exit 9
 git cat-file -e "$S^{commit}" || { echo "SHA not in forgedev repo"; exit 9; }
-git worktree remove --force ~/verify >/dev/null 2>&1; rm -rf ~/verify; git worktree prune
-git worktree add -q --detach ~/verify "$S" || exit 9
-ln -s ~/forgetrader/.venv ~/verify/.venv
-cd ~/verify
+git worktree remove --force ~/verify-$B >/dev/null 2>&1; rm -rf ~/verify-$B; git worktree prune
+git worktree add -q --detach ~/verify-$B "$S" || exit 9
+ln -s ~/forgetrader/.venv ~/verify-$B/.venv
+cd ~/verify-$B
 echo "worktree HEAD: $(git rev-parse HEAD)"
 fail=0
 for t in tests/test_*.py; do
@@ -42,7 +44,7 @@ for f in "$@"; do
 done
 echo "tracked files changed after FI: $(git status --short --untracked-files=no | wc -l)"
 exit $fail
-' _ "$SHA" $FI
+' _ "$B" "$SHA" $FI
 RC=$?
 set -e
 echo "=== diff stat"; git --no-pager diff --stat "main...$SHA"
