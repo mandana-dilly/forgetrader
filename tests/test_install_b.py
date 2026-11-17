@@ -211,16 +211,27 @@ class Fixture:
 
 all_outputs = []
 
+
+
+def render(a_name, a_text):
+    """ib.render, with a refusal recorded as a failed assertion (never a traceback)."""
+    try:
+        return ib.render(a_name, a_text)
+    except ib.Refused as e:
+        check(False, f"R0 {a_name} renders without refusal, got {e}")
+        return None, ""
+
+
 # --------------------------------------------------------------------------- R
 print("R  render")
 for a_name, a_text in A_UNITS.items():
     if a_name not in ib.SPEC:
         continue
-    b_name, b_text = ib.render(a_name, a_text)
+    b_name, b_text = render(a_name, a_text)
     check(b_name in EXPECTED_B, f"R1 {a_name} renders to an expected name, got {b_name}")
     check(b_text == EXPECTED_B.get(b_name), f"R2 {b_name} text equals the literal expected text")
 for a_name in ("forgetrader-run.timer", "forgetrader-digest.timer"):
-    b_name, b_text = ib.render(a_name, A_UNITS[a_name])
+    b_name, b_text = render(a_name, A_UNITS[a_name])
     for m in ("10:30", "13:00", "16:30"):
         check(m not in b_text, f"R3 A minute {m} never in {b_name}")
 check(ib.A_PATH_RE.subn(r"\1/forgetrader-b", "x %h/forgetrader-b/a %h/forgetrader/b "
