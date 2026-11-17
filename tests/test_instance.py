@@ -301,7 +301,10 @@ def part_c():
             screener.load_credentials = spy
         with env(None), contextlib.redirect_stderr(err), \
                 contextlib.redirect_stdout(io.StringIO()):
-            rets["cc_scan"] = cc_scan.main(["--ticker", "F", "--basis", "12.00"])
+            try:
+                rets["cc_scan"] = cc_scan.main(["--ticker", "F", "--basis", "12.00"])
+            except AssertionError:  # the spy: never past it to a client
+                rets["cc_scan"] = "credentials_read"
             for name, mod in (("wheel_dryrun", wheel_dryrun), ("screener", screener)):
                 sys.argv = [f"{name}.py"]
                 try:
@@ -309,6 +312,8 @@ def part_c():
                     rets[name] = "returned"
                 except SystemExit as e:
                     rets[name] = e.code
+                except AssertionError:
+                    rets[name] = "credentials_read"
     finally:
         (credentials.load_credentials, wheel_dryrun.load_credentials,
          screener.load_credentials, sys.argv) = orig
