@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
+import forge_instance
 from credentials import CredentialsError, load_credentials
 
 from alpaca.data.enums import DataFeed
@@ -35,7 +36,6 @@ from alpaca.trading.requests import GetAssetsRequest, GetOptionContractsRequest
 from gates import FAILS_DELIM, evaluate_contract
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-POLICY_PATH = SCRIPT_DIR / "policy.toml"
 SCANS_DIR = SCRIPT_DIR / "scans"
 
 # ---------------------------------------------------------------------------
@@ -76,7 +76,9 @@ def header(title):
 
 
 def load_policy():
-    with open(POLICY_PATH, "rb") as f:
+    """The policy file of the current instance (forge_instance.current());
+    raises forge_instance.InstanceError when FORGE_INSTANCE does not resolve."""
+    with open(forge_instance.current().policy_path, "rb") as f:
         return tomllib.load(f)
 
 
@@ -499,6 +501,12 @@ def main():
     parser.add_argument("--max-chains", type=int, default=0)
     parser.add_argument("--limit", type=int, default=0)
     args = parser.parse_args()
+
+    try:
+        forge_instance.current()
+    except forge_instance.InstanceError as e:
+        print(f"FATAL: {e}", file=sys.stderr)
+        sys.exit(1)
 
     try:
         api_key, api_secret, paper = load_credentials()

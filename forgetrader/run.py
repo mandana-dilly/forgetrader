@@ -9,6 +9,10 @@ Run sequence:
   1. LOAD state.json first. Missing -> HALT:state_missing (exit 4); run.py
      never creates state (only `forgetrader_state.py --init` does). Corrupt
      state is an uncaught loud failure.
+  1b. Resolve the instance (forge_instance.current(): policy file, alert
+     prefix) BEFORE credentials, any client or any broker read. InstanceError
+     -> HALT:instance <msg> (exit 4): one run row with the mode prefix,
+     last_run only, alert with prefix "[forgetrader-?] ", no broker read.
   2. Load credentials. With --live, refuse unless paper is True BEFORE any
      client is built or any broker read: live:refused:not_paper, run row
      journalled, no state write, exit 3.
@@ -56,14 +60,15 @@ Exit codes (morning-review contract):
   1  uncaught exception (auth / network / corrupt state)
   2  argparse error
   3  --live refused: not paper
-  4  HALT (state_missing | clock | snapshot | reconcile | watchlist_structure
-     | submit)
+  4  HALT (state_missing | instance | clock | snapshot | reconcile
+     | watchlist_structure | submit)
 """
 import argparse
 import json
 import sys
 
 import alerts
+import forge_instance
 import forgetrader_state as fs
 
 
@@ -171,6 +176,26 @@ def _halt_exit(conn, run_id, state, action, mode):
     return 4
 
 
+def _instance_halted(conn, run_id, state, mode):
+    """False when FORGE_INSTANCE resolves. Otherwise HALT:instance, the same
+    shape as HALT:state_missing plus last_run: alert stub, stderr, last_run
+    only (the state it is given, nothing else changed), one run row, one
+    alert with the unknown-instance prefix; returns True (caller exits 4)."""
+    try:
+        forge_instance.current()
+    except forge_instance.InstanceError as e:
+        action = f"HALT:instance {_no_redirect(e)}"
+        fs.alert_stub(action)
+        print(action, file=sys.stderr)
+        state["last_run"] = {"ts": fs._now_iso(), "outcome": f"{mode}:{action}"}
+        fs.write_state(state)
+        fs.record_run(conn, run_id, f"{mode}:{action}")
+        alerts.send(_summary(f"{mode}:{action}", state),
+                    prefix=forge_instance.UNKNOWN_PREFIX)
+        return True
+    return False
+
+
 def run(live=False):
     """One run. live=False (default) never submits; live=True may submit one
     CSP via place_csp when _submit_gate passes. Returns the exit code."""
@@ -194,6 +219,11 @@ def run(live=False):
         stage = state["wheel"]["stage"]
         tracked = (state["wheel"].get("client_order_id")
                    if stage in (fs.CSP_PENDING, fs.CC_PENDING) else None)
+
+        # 1b. Instance BEFORE credentials, clients or any broker read: an
+        #    unresolved FORGE_INSTANCE must never load another account's policy.
+        if _instance_halted(conn, run_id, state, mode):
+            return 4
 
         # 2-3. Credentials, then the SDK clients ONCE for this process. All
         #    imports are local so `import forgetrader.run` still needs no

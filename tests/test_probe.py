@@ -24,6 +24,7 @@ import tempfile
 import types
 from pathlib import Path
 
+os.environ["FORGE_INSTANCE"] = "a"  # instance a: policy.toml, prefix "[forgetrader] "
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import alerts

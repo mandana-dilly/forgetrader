@@ -1,10 +1,15 @@
 """Outbound Telegram alerts (Brief 4). Outbound only: sendMessage is the one
 Bot API method called; nothing is read back, no polling, no webhook.
 
-send(text) posts "[forgetrader] " + text as plain text (no parse_mode) to
-TELEGRAM_CHAT_ID through the bot TELEGRAM_BOT_TOKEN. Both are read from the
-repo-root .env through the same path credentials.py loads (load_dotenv on
-credentials._ENV_PATH); an already-set environment variable wins, as there.
+send(text) posts the instance prefix (forge_instance.current().prefix, e.g.
+"[forgetrader] " for instance a) + text as plain text (no parse_mode) to
+TELEGRAM_CHAT_ID through the bot TELEGRAM_BOT_TOKEN. A caller that already
+knows the instance cannot resolve passes prefix= explicitly (run.py's
+HALT:instance passes forge_instance.UNKNOWN_PREFIX); an unresolvable
+instance with no explicit prefix is one WARNING naming InstanceError, nothing
+sent. Token and chat id are read from the repo-root .env through the same
+path credentials.py loads (load_dotenv on credentials._ENV_PATH); an
+already-set environment variable wins, as there.
 
 An alert never changes a run: send() never raises. A missing token or chat
 id, a transport exception or a non-200 reply each print ONE stderr WARNING
@@ -25,10 +30,10 @@ import urllib.request
 from dotenv import load_dotenv
 
 import credentials
+import forge_instance
 
 ENV_PATH = credentials._ENV_PATH
 API_BASE = "https://api.telegram.org"
-PREFIX = "[forgetrader] "
 TIMEOUT_S = 10
 
 
@@ -46,16 +51,19 @@ def _urllib_transport(url, body, timeout):
         return resp.status
 
 
-def send(text, transport=None):
-    """Post one alert. True if Telegram answered 200, else False. Never raises."""
+def send(text, transport=None, prefix=None):
+    """Post one alert. True if Telegram answered 200, else False. Never raises.
+    prefix None = the current instance's prefix, resolved at send time."""
     try:
+        if prefix is None:
+            prefix = forge_instance.current().prefix
         token, chat_id = _config()
         if not token or not chat_id:
             print("WARNING: alert skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID "
                   "not set", file=sys.stderr)
             return False
         body = urllib.parse.urlencode(
-            {"chat_id": chat_id, "text": PREFIX + str(text)}).encode("utf-8")
+            {"chat_id": chat_id, "text": prefix + str(text)}).encode("utf-8")
         status = (transport or _urllib_transport)(
             f"{API_BASE}/bot{token}/sendMessage", body, TIMEOUT_S)
         if status != 200:

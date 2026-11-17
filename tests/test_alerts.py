@@ -39,6 +39,7 @@ from pathlib import Path
 
 TESTS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(TESTS)
+os.environ["FORGE_INSTANCE"] = "a"  # instance a: policy.toml, prefix "[forgetrader] "
 sys.path.insert(0, ROOT)
 sys.path.insert(0, TESTS)
 

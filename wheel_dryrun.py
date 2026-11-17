@@ -15,7 +15,7 @@ Reuse (imported, never reimplemented):
   gates.evaluate_contract, gates.FAILS_DELIM         - the shared gate chain
   screener.price_from_chain                           - price-source precedence
   screener.compute_collateral_numbers                 - affordability ceiling
-  screener.load_policy                                - policy.toml
+  screener.load_policy                                - the instance's policy file
   screener.init_throttle / screener.throttle          - one shared rate limiter
   watchlist.load_watchlist / WatchlistStructureError  - the human approval gate
   watchlist._parse_date                               - earnings_date reparse,
@@ -49,6 +49,7 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
+import forge_instance
 from credentials import CredentialsError, load_credentials
 
 from alpaca.data.enums import DataFeed
@@ -484,6 +485,12 @@ def main():
         help="cap on --wait-for-open polling before giving up (default 20)",
     )
     args = parser.parse_args()
+
+    try:
+        forge_instance.current()
+    except forge_instance.InstanceError as e:
+        print(f"FATAL: {e}", file=sys.stderr)
+        sys.exit(1)
 
     try:
         api_key, api_secret, paper = load_credentials()

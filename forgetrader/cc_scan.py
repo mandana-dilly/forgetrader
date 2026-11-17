@@ -13,9 +13,11 @@ reads the broker clock ONCE, makes read-only data calls, prints the ranked
 candidates and top_rejects, and writes NOTHING (no state, no journal, no
 scans/). This module never imports forgetrader.submit and has no order path.
 
-Exit codes: 0 ok (candidates or a correct empty result), 3 bad args or clock
-invalid, 4 watchlist structure (D7 HALT class; nothing is journalled because
-this CLI writes nothing), 1 uncaught (auth / network).
+Exit codes: 0 ok (candidates or a correct empty result), 3 bad args, clock
+invalid or FORGE_INSTANCE unresolved (forge_instance.InstanceError, before
+credentials or any broker read), 4 watchlist structure (D7 HALT class;
+nothing is journalled because this CLI writes nothing), 1 uncaught (auth /
+network).
 """
 import argparse
 import math
@@ -35,6 +37,7 @@ from alpaca.trading.enums import AssetStatus, ContractType
 from alpaca.trading.requests import GetOptionContractsRequest
 
 import credentials
+import forge_instance
 import screener
 import watchlist
 from gates import FAILS_DELIM, evaluate_call
@@ -285,6 +288,11 @@ def main(argv=None):
         ticker, basis = _parse_args(argv)
     except _BadArgs as e:
         print(f"BAD ARGS: {e}", file=sys.stderr)
+        return 3
+    try:
+        forge_instance.current()
+    except forge_instance.InstanceError as e:
+        print(f"INSTANCE ERROR: {e}", file=sys.stderr)
         return 3
 
     key, secret, paper = credentials.load_credentials()

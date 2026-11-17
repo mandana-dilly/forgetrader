@@ -57,7 +57,7 @@ EXPECTED_RUNS_WEEKDAY = 2
 HALT_SHOW = 10
 LAST_RUNS = 5
 STAMP_DAYS = 14
-DIGEST_MAX = 3400  # under 3500 with alerts.PREFIX added
+DIGEST_MAX = 3400  # under 3500 with the instance alert prefix added
 OUTCOME_MAX = 200
 FILL_ACTIONS = ("CSP_PENDING->CSP_OPEN (fill)", "CC_PENDING->CC_OPEN (fill)")
 

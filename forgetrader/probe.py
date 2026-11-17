@@ -7,6 +7,10 @@ limit. Does NOT prove fill or assignment. place_csp is not modified here.
 Run as `.venv/bin/python -m forgetrader.probe --contract <OCC> [--submit]`
 from ~/forgetrader. Without --submit nothing is ever submitted.
 
+FORGE_INSTANCE is resolved first (forge_instance.current()); an
+InstanceError prints "INSTANCE ERROR: <msg>" to stderr and is the refusal
+"instance", before credentials or any broker read.
+
 Every refusal prints "PROBE REFUSED <check>", journals a decision row and a run
 row "probe:refused:<check>", submits nothing, writes no state, and exits 3.
 probe.py never calls write_state: the only state write is place_csp's
@@ -30,6 +34,7 @@ from alpaca.trading.client import TradingClient
 
 import alerts
 import credentials
+import forge_instance
 import forgetrader_state as fs
 import screener
 import watchlist
@@ -62,6 +67,14 @@ def _checks(args, conn, run_id, stage):
     """Run the refusal sequence. Returns (tc, state, ts, sym, root, detail,
     limit) on success; raises _Refused(check) on the first failing check."""
     sym = args.contract
+
+    # 0. instance (policy file, alert prefix) before credentials or any
+    #    broker read.
+    try:
+        forge_instance.current()
+    except forge_instance.InstanceError as e:
+        print(f"INSTANCE ERROR: {e}", file=sys.stderr)
+        raise _Refused("instance")
 
     # 1. paper only, before any client exists.
     _key, _secret, paper = credentials.load_credentials()

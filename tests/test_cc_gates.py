@@ -32,6 +32,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+os.environ["FORGE_INSTANCE"] = "a"  # instance a: policy.toml, prefix "[forgetrader] "
 sys.path.insert(0, str(REPO))
 
 import forgetrader_state as fs  # noqa: E402
