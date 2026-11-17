@@ -327,11 +327,13 @@ write(fd2, "redflags", {"role": "redflags", "run_date": RUN_DATE, "items": [
 validate(fd2, "earnings")
 validate(fd2, "redflags")
 write(fd2, "redflags", {"role": "redflags", "run_date": RUN_DATE, "items": []})   # edited after .ok
+runs_before = store.db.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
 try:
     store.ingest(fd2)
     check(False, "F6 ingest accepted a file edited after validation")
-except facts.NotValidated:
-    check(store.earnings_date("CON") is None, "F6 refused run partly stored")
+except facts.NotValidated as e:
+    check("redflags" in str(e), f"F6 refusal names redflags: {e}")
+check(store.db.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == runs_before, "F6 refused run partly stored")
 validate(fd2, "redflags")
 check(sorted(store.ingest(fd2)) == ["earnings", "redflags"], "F7 ingest second run")
 check(store.earnings_date("AGR") is None, f"F7 latest conflict must hide older agree: {store.earnings_date('AGR')}")
