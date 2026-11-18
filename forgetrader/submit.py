@@ -11,6 +11,8 @@ place_cc() (Brief B6) is the same contract for one covered call at HOLDING:
 HOLDING -> CC_PENDING, ticker and cost_basis kept. place_csp is unchanged.
 
 fs.* is always reached through the module so tests can monkeypatch it.
+Every journal row written here is stamped with as_of_ts, the run's broker
+clock timestamp (D13); this module never reads a clock.
 """
 import math
 import uuid
@@ -102,13 +104,14 @@ def place_csp(trading_client, state, proposal, conn, run_id, as_of_ts,
     try:
         fs.write_state(new, state_path)  # write-ahead
         fs.record_order(conn, run_id, sym, "sell", CSP_QTY, limit_price,
-                        status=None, client_order_id=coid, broker_order_id=None)
+                        status=None, ts=as_of_ts, client_order_id=coid,
+                        broker_order_id=None)
         broker_reached = True
         order = trading_client.submit_order(req)  # exactly once
         status = order.status.value
         broker_order_id = str(order.id)
         fs.record_order(conn, run_id, sym, "sell", CSP_QTY, limit_price,
-                        status=status, client_order_id=coid,
+                        status=status, ts=as_of_ts, client_order_id=coid,
                         broker_order_id=broker_order_id)
         return new, _result("submitted", "submitted", coid, broker_order_id,
                             status, True)
@@ -116,7 +119,8 @@ def place_csp(trading_client, state, proposal, conn, run_id, as_of_ts,
         try:
             fs.record_event(
                 conn, run_id, "submit_exception", symbol=sym,
-                detail=f"broker_reached={broker_reached} {type(e).__name__}: {e}")
+                detail=f"broker_reached={broker_reached} {type(e).__name__}: {e}",
+                ts=as_of_ts)
         except Exception:
             pass
         try:
@@ -230,13 +234,14 @@ def place_cc(trading_client, state, proposal, conn, run_id, as_of_ts,
     try:
         fs.write_state(new, state_path)  # write-ahead
         fs.record_order(conn, run_id, sym, "sell", CC_QTY, limit_price,
-                        status=None, client_order_id=coid, broker_order_id=None)
+                        status=None, ts=as_of_ts, client_order_id=coid,
+                        broker_order_id=None)
         broker_reached = True
         order = trading_client.submit_order(req)  # exactly once
         status = order.status.value
         broker_order_id = str(order.id)
         fs.record_order(conn, run_id, sym, "sell", CC_QTY, limit_price,
-                        status=status, client_order_id=coid,
+                        status=status, ts=as_of_ts, client_order_id=coid,
                         broker_order_id=broker_order_id)
         return new, _result("submitted", "submitted", coid, broker_order_id,
                             status, True)
@@ -244,7 +249,8 @@ def place_cc(trading_client, state, proposal, conn, run_id, as_of_ts,
         try:
             fs.record_event(
                 conn, run_id, "submit_exception", symbol=sym,
-                detail=f"broker_reached={broker_reached} {type(e).__name__}: {e}")
+                detail=f"broker_reached={broker_reached} {type(e).__name__}: {e}",
+                ts=as_of_ts)
         except Exception:
             pass
         try:

@@ -376,8 +376,29 @@ def reconcile(state, broker_snapshot, as_of_date=None):
 # State schema + read/write                                                  #
 # --------------------------------------------------------------------------- #
 
+# D13: while run.py holds a run instant (the broker clock's timestamp, or a
+# pre-clock host instant from run.preclock_now) every timestamp this module
+# writes (journal ts defaults, generated_at, HALT dumps) is that instant.
+# None (CLI, tests, outside a run) keeps the host clock.
+_RUN_NOW = None
+
+
+def pin_now(instant):
+    """run.py only: pin the run instant (tz-aware datetime), or None to
+    release it. Raises on a tz-naive instant."""
+    global _RUN_NOW
+    if instant is not None and (instant.tzinfo is None
+                                or instant.utcoffset() is None):
+        raise ValueError("pin_now: tz-naive instant")
+    _RUN_NOW = instant
+
+
+def _now():
+    return _RUN_NOW if _RUN_NOW is not None else datetime.now(timezone.utc)
+
+
 def _now_iso():
-    return datetime.now(timezone.utc).isoformat()
+    return _now().isoformat()
 
 
 def _safe_float(value):
@@ -590,7 +611,7 @@ def dump_halt(broker_snapshot, state, reason):
     """Write scans/state_halt_<ts>.txt with the reason, current state, and the
     broker snapshot that triggered the HALT. Returns the path written."""
     SCANS_DIR.mkdir(exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
+    ts = _now().astimezone(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
     path = SCANS_DIR / f"state_halt_{ts}.txt"
     with open(path, "w") as f:
         f.write("FORGETRADER STATE HALT\n")

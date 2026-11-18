@@ -330,3 +330,20 @@ def evaluate_call(contract, snap, cost_basis, underlying_price,
         "all_pass": all_pass,
         "rejected_by": FAILS_DELIM.join(fails),
     }
+
+
+# --------------------------------------------------------------------------- #
+# Brief B8 (D31) - option quote timestamp and ask, logged on every gate row.   #
+# Log only: no gate reads these. evaluate_contract / evaluate_call untouched.  #
+# --------------------------------------------------------------------------- #
+
+def quote_fields(snap):
+    """Pure. (quote_ts, quote_ask) of an option snapshot's latest_quote:
+    quote_ts the quote timestamp's isoformat, quote_ask its ask_price; each
+    None when the snapshot, the quote or the value is absent."""
+    q = getattr(snap, "latest_quote", None) if snap is not None else None
+    if q is None:
+        return None, None
+    ts = getattr(q, "timestamp", None)
+    ask = getattr(q, "ask_price", None)
+    return (ts.isoformat() if ts is not None else None), ask

@@ -43,6 +43,13 @@ Run sequence:
      row; refused:not_paper sends its outcome after its run row. One message
      per run. An alert failure never changes the exit code, state or journal.
 
+Timestamps (D13, D13a): every journal ts, last_run.ts, generated_at,
+opened_at and the as_of handed to the scans and to place_csp / place_cc is the
+broker clock's timestamp; the run date is its ET date. Outcomes that happen
+before a broker clock can exist (PRECLOCK_OUTCOMES) are stamped with host UTC
+time, read only through preclock_now(). run.py pins the chosen instant into
+forgetrader_state (fs.pin_now) so every row the run writes carries it.
+
 Every runs.outcome and last_run.outcome carries the mode prefix "dryrun:" or
 "live:" (state_missing included). Live FLAT-stable and HOLDING-stable
 outcomes:
@@ -66,10 +73,37 @@ Exit codes (morning-review contract):
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 
 import alerts
 import forge_instance
 import forgetrader_state as fs
+
+
+# D13a: the closed set of outcomes that happen BEFORE a broker clock can
+# exist. state_missing, instance and not_paper journal a row; credentials and
+# clients (build failures) and a get_clock exception are uncaught (exit 1,
+# D7) and write nothing; clock is the missing / tz-naive timestamp HALT.
+PRECLOCK_OUTCOMES = frozenset({"state_missing", "instance", "not_paper", "credentials", "clients", "clock"})
+
+
+def preclock_now(outcome):
+    """The ONLY host-clock read in run.py and submit.py (D13a): tz-aware UTC
+    now, for an outcome in PRECLOCK_OUTCOMES. Any other outcome raises
+    ValueError - it happens after the clock read and is stamped with
+    clock.timestamp."""
+    if outcome not in PRECLOCK_OUTCOMES:
+        raise ValueError(f"preclock_now: {outcome!r} is not a pre-clock outcome")
+    return datetime.now(timezone.utc)
+
+
+def _quote_tokens(row):
+    """D31: the option quote's timestamp and ask on a journalled gate row
+    (None when the quote lacked them; logged, never gated on). A row built
+    without the D31 producer fields renders nothing extra."""
+    if "quote_ts" not in row and "quote_ask" not in row:
+        return ""
+    return f" quote_ts={row.get('quote_ts')} quote_ask={row.get('quote_ask')}"
 
 
 def _proposal_line(row, is_open):
@@ -82,6 +116,7 @@ def _proposal_line(row, is_open):
         f"bid={row['bid']} oi={row['open_interest']} "
         f"annualized_yield_pct={row['annualized_yield_pct']} "
         f"collateral={row['collateral']:.2f} market_open={is_open}"
+        f"{_quote_tokens(row)}"
     )
 
 
@@ -137,6 +172,7 @@ def _cc_proposal_line(row, is_open):
         f"oi={row['open_interest']} "
         f"annualized_yield_pct={row['annualized_yield_pct']} "
         f"market_open={is_open}"
+        f"{_quote_tokens(row)}"
     )
 
 
@@ -184,6 +220,7 @@ def _instance_halted(conn, run_id, state, mode):
     try:
         forge_instance.current()
     except forge_instance.InstanceError as e:
+        fs.pin_now(preclock_now("instance"))
         action = f"HALT:instance {_no_redirect(e)}"
         fs.alert_stub(action)
         print(action, file=sys.stderr)
@@ -209,6 +246,7 @@ def run(live=False):
         try:
             state = fs.load_state()
         except FileNotFoundError:
+            fs.pin_now(preclock_now("state_missing"))
             fs.alert_stub(f"HALT state_missing | {fs.STATE_PATH} absent; "
                           f"run --init deliberately")
             fs.record_run(conn, run_id, f"{mode}:HALT:state_missing")
@@ -245,6 +283,7 @@ def run(live=False):
         # --live is paper-only until Phase W: refuse BEFORE any client exists
         # or any broker read. No state write.
         if live is True and paper is not True:
+            fs.pin_now(preclock_now("not_paper"))
             fs.record_decision(conn, run_id, stage_from=stage, stage_to=stage,
                                action="refused:not_paper", detail="")
             fs.record_run(conn, run_id, f"{mode}:refused:not_paper")
@@ -272,11 +311,14 @@ def run(live=False):
         ts = getattr(clock, "timestamp", None)
         if (clock is None or ts is None or ts.tzinfo is None
                 or ts.utcoffset() is None):
+            fs.pin_now(preclock_now("clock"))
             reason = "clock timestamp missing or tz-naive"
             fs.alert_stub(f"HALT {reason}")
             fs.record_decision(conn, run_id, stage_from=stage, stage_to=stage,
                                action=f"HALT:{reason}", detail="")
             return _halt_exit(conn, run_id, state, f"HALT:{reason}", mode)
+        # From here every stamp the run writes is the broker clock (D13).
+        fs.pin_now(ts)
         now_et = ts.astimezone(ZoneInfo("America/New_York"))
         run_date = now_et.date()
 
@@ -478,6 +520,7 @@ def run(live=False):
         alerts.send(summary)
         return 0
     finally:
+        fs.pin_now(None)
         conn.close()
 
 

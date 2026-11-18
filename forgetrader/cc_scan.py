@@ -40,7 +40,7 @@ import credentials
 import forge_instance
 import screener
 import watchlist
-from gates import FAILS_DELIM, evaluate_call
+from gates import FAILS_DELIM, evaluate_call, quote_fields
 
 WATCHLIST_PATH = Path(__file__).resolve().parent.parent / "watchlist.json"
 ET = ZoneInfo("America/New_York")
@@ -201,6 +201,10 @@ def scan_calls(ticker, cost_basis, trading_client, stock_client, option_client,
             entry["max_spread_to_bid_ratio"],
             entry["min_annualized_yield_pct"],
             policy["universe"]["max_price_staleness_min"])
+        # D31: log the option quote's timestamp and ask (never gated on).
+        quote_ts, quote_ask = quote_fields(snapshots.get(c.symbol))
+        row["quote_ts"] = quote_ts
+        row["quote_ask"] = quote_ask
         all_rows.append(row)
         if row["all_pass"]:
             candidates.append(row)

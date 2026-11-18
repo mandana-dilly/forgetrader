@@ -60,7 +60,7 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import AssetStatus, ContractType
 from alpaca.trading.requests import GetOptionContractsRequest
 
-from gates import FAILS_DELIM, evaluate_contract
+from gates import FAILS_DELIM, evaluate_contract, quote_fields
 from screener import (
     compute_collateral_numbers,
     init_throttle,
@@ -410,6 +410,10 @@ def scan_watchlist(trading_client, stock_client, option_client, policy, now_et,
                 max_staleness_min,
             )
             row["underlying_symbol"] = ticker
+            # D31: log the option quote's timestamp and ask (never gated on).
+            quote_ts, quote_ask = quote_fields(snapshots.get(c.symbol))
+            row["quote_ts"] = quote_ts
+            row["quote_ask"] = quote_ask
 
             # Engine-owned earnings gate: expiry strictly before earnings_date,
             # fail-closed when the date did not parse.
