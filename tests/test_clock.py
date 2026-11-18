@@ -558,7 +558,8 @@ def part_i():
         check("time" not in mods, f"I3 {name} imports time")
     # I4 the scanner bites on planted calls.
     planted = run_src + "\n\ndef _planted():\n    return datetime.now(timezone.utc)\n"
-    check(len(host_clock_calls(planted)) == 2, "I4 scanner missed a planted datetime.now")
+    check(len(host_clock_calls(planted)) == len(rc) + 1,
+          "I4 scanner missed a planted datetime.now")
     check(host_clock_calls("import time\nx = time.time()\n") == [("<module>", 2)],
           "I4 scanner missed a planted time.time")
 
