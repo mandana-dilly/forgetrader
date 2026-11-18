@@ -13,9 +13,10 @@ grep, git, tee, cat, cp, stat, env and the python are argv-logging wrappers.
      call, no canary written.
   C  clean: default target is forgedev; A only prints B absent and covers A only (13 PASS);
      A and B covers both (19 PASS); every sudo runs as the target.
-  F  B keys in a file the target reads, in the target's login env, in B's git history;
-     B .env or B canary exposed; sudo allowed; target in group forge; B .env with 2 keys
-     (ABORT, nothing probed); a B leak with B's .env absent is not covered (PASS).
+  F  B keys in a file the target reads, in the target's login env, in B's git history,
+     in B's history only on a tag (--all); B .env or B canary exposed; sudo allowed; target
+     in group forge; B .env with 2 keys (ABORT, nothing probed); an A leak is listed; a stray
+     key of an absent B is not covered (PASS).
   N  in every run no key value appears in the output or in any logged argv.
   S  static: no bash -x, forgedev only as the default, echo/printf/res lines use only
      non-secret variables, the pattern files are only read by grep or cp, no eval/read,
@@ -276,6 +277,17 @@ def leak_history(x):
 
 
 fail_case("F3", ["FAIL git history B"], leak_history)
+
+
+def leak_side_branch(x):
+    run(["git", "-C", str(x.b), "checkout", "-q", "-b", "side"], x.env)
+    leak_history(x)
+    run(["git", "-C", str(x.b), "checkout", "-q", "main"], x.env)
+    run(["git", "-C", str(x.b), "branch", "-q", "-D", "side"], x.env)
+    run(["git", "-C", str(x.b), "tag", "kept", "HEAD@{1}"], x.env)
+
+
+fail_case("F3b", ["FAIL git history B"], leak_side_branch)
 fail_case("F4", ["FAIL .env B"], lambda x: x.env.update(FAKE_EXPOSE=f"{x.b}/.env"))
 fail_case("F5", ["FAIL canary B"], lambda x: x.env.update(FAKE_EXPOSE=f"{x.b}/canary.secret"))
 fail_case("F6", ["FAIL sudo for hermes BLOCKED"], lambda x: x.env.update(FAKE_SUDO_N="allow"))
