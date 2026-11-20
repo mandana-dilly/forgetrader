@@ -11,7 +11,8 @@ datetime), so a host stamp anywhere on the run path reads as that other day.
      events / orders ts, last_run.ts, generated_at and opened_at with the
      clock instant (literal); reconcile gets as_of_date = its ET date; the CSP
      scan gets now_et = the clock in ET and run_date = its ET date; the HALT
-     dump is named and stamped from the clock.
+     dump is named and stamped from the clock. K7 (D13b): the same instant
+     handed over with the ET offset still stamps every row with the UTC string.
   P  pre-clock: state_missing, instance, not_paper, tz-naive clock and
      missing clock timestamp stamp every row / last_run / generated_at with
      the host instant (literal); a credentials, client-build or get_clock
@@ -44,6 +45,7 @@ import sys
 import tempfile
 import types
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 TESTS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(TESTS)
@@ -70,6 +72,7 @@ CLOCK = datetime.datetime(2026, 11, 5, 2, 30, tzinfo=UTC)
 CLOCK_ISO = "2026-11-05T02:30:00+00:00"
 CLOCK_ET_DATE = datetime.date(2026, 11, 4)
 CLOCK_ET_ISO = "2026-11-04T21:30:00-05:00"
+CLOCK_NY = CLOCK.astimezone(ZoneInfo("America/New_York"))  # K7: Alpaca's ET-offset form
 HOST = datetime.datetime(2026, 11, 9, 13, 0, tzinfo=UTC)
 HOST_ISO = "2026-11-09T13:00:00+00:00"
 REAL_FILES = [Path(ROOT) / "state.json", Path(ROOT) / "journal.db"]
@@ -249,6 +252,29 @@ def part_k():
     # K6 the pin is released after a run: outside a run fs reads the host.
     with host_clock():
         check(fs._now_iso() == HOST_ISO, f"K6 pin leaked past the run {fs._now_iso()!r}")
+
+    # K7 (D13b) the clock instant arrives with the ET offset, as Alpaca sends
+    # it; every stamp is still the UTC string, now_et and as_of_date unchanged.
+    scan_args.clear()
+    o = _drive("K7a", flat, fin, clock_ts=CLOCK_NY, scan=scan)
+    check(o["ret"] == 0, f"K7a exit {o['ret']!r}")
+    _all_stamped("K7a", o, CLOCK_ISO)
+    _state_stamped("K7a", o, CLOCK_ISO)
+    check(o["as_of_dates"] == [CLOCK_ET_DATE], f"K7a as_of_date {o['as_of_dates']!r}")
+    check(len(scan_args) == 1 and scan_args[0][0].isoformat() == CLOCK_ET_ISO
+          and scan_args[0][1] == CLOCK_ET_DATE,
+          f"K7a scan now_et / run_date {scan_args!r}")
+    o = _drive("K7b", flat, fin, clock_ts=CLOCK_NY, live=True, is_open=True,
+               scan=lambda *a, **k: trs._scan_result([], [CSP_ROW]))
+    check(o["ret"] == 0 and len(o["submit_calls"]) == 1,
+          f"K7b exit {o['ret']!r} submits {len(o['submit_calls'])}")
+    w = o["state"]["wheel"]
+    check(w["stage"] == fs.CSP_PENDING and w["opened_at"] == CLOCK_ISO,
+          f"K7b opened_at {w['opened_at']!r} stage {w['stage']!r}")
+    check(len(o["ts"]["orders"]) == 2, f"K7b orders rows {o['ts']['orders']!r}")
+    _all_stamped("K7b", o, CLOCK_ISO)
+    _state_stamped("K7b", o, CLOCK_ISO)
+    check(o["as_of_dates"] == [CLOCK_ET_DATE], f"K7b as_of_date {o['as_of_dates']!r}")
 
 
 # --------------------------------------------------------------------------- #

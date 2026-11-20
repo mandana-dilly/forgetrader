@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Brief B8 Tier 1 fault injection (D13 one broker clock, D13a pre-clock
-# carve-out, D31 quote ts / ask on gate rows).
+# carve-out, D13b UTC normalisation, D31 quote ts / ask on gate rows).
 # Run AS forgedev from anywhere:  bash tests/fi/fi_b8.sh
 # Everything runs in a temp copy of this worktree (tracked files only); the
 # worktree itself is never mutated. Per mutation: pristine copy of the
 # source, sed -i ONE line-addressed change, print mutated_lines (expect 1),
 # run tests/test_clock.py (must exit non-zero), cp restore from pristine,
 # sha256sum -c, run ALL suites (each must exit 0).
-# Prints "FI Mn bit" or "FI Mn DID NOT BITE"; exits 0 only if all five bite
+# Prints "FI Mn bit" or "FI Mn DID NOT BITE"; exits 0 only if all six bite
 # and every restore verifies with all suites green.
 set -u
 SRC=$(cd "$(dirname "$0")/../.." && pwd)
@@ -114,11 +114,19 @@ mutate M5 wheel_dryrun.py 'row["quote_ask"] = quote_ask' \
     'd' \
     'the CSP gate row omits the quote ask'
 
+# M6 (D13b). Pre-registered: only tests/test_clock.py fails, and only K7
+# assertions, 7 of them: K7a journal ts, last_run.ts, generated_at; K7b
+# opened_at, journal ts, last_run.ts, generated_at. now_et and as_of_date are
+# derived through astimezone, so they stay correct without the line.
+mutate M6 forgetrader/run.py 'ts = ts.astimezone(timezone.utc)' \
+    'd' \
+    'the clock instant is not normalised to UTC (Alpaca ET offset leaks into every stamp)'
+
 echo
 echo "final sha256sum -c:"
 sha256sum -c "$PRISTINE/sources.sha256"
 if [ "$ALL_BIT" = 1 ]; then
-    echo "FI b8: all 5 mutations bit"
+    echo "FI b8: all 6 mutations bit"
     exit 0
 fi
 echo "FI b8: NOT ALL MUTATIONS BIT"

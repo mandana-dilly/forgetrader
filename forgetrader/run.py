@@ -43,9 +43,10 @@ Run sequence:
      row; refused:not_paper sends its outcome after its run row. One message
      per run. An alert failure never changes the exit code, state or journal.
 
-Timestamps (D13, D13a): every journal ts, last_run.ts, generated_at,
+Timestamps (D13, D13a, D13b): every journal ts, last_run.ts, generated_at,
 opened_at and the as_of handed to the scans and to place_csp / place_cc is the
-broker clock's timestamp; the run date is its ET date. Outcomes that happen
+broker clock's timestamp normalised to UTC (+00:00) once, at the clock read;
+the run date is its ET date. Outcomes that happen
 before a broker clock can exist (PRECLOCK_OUTCOMES) are stamped with host UTC
 time, read only through preclock_now(). run.py pins the chosen instant into
 forgetrader_state (fs.pin_now) so every row the run writes carries it.
@@ -317,6 +318,9 @@ def run(live=False):
             fs.record_decision(conn, run_id, stage_from=stage, stage_to=stage,
                                action=f"HALT:{reason}", detail="")
             return _halt_exit(conn, run_id, state, f"HALT:{reason}", mode)
+        # D13b: the run instant is normalised to UTC once, here (Alpaca's
+        # clock timestamp carries the ET offset).
+        ts = ts.astimezone(timezone.utc)
         # From here every stamp the run writes is the broker clock (D13).
         fs.pin_now(ts)
         now_et = ts.astimezone(ZoneInfo("America/New_York"))
