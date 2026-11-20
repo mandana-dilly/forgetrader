@@ -25,7 +25,8 @@ Never the network, never forge's home, never a real bundle drop.
      with equal patch-ids, new bundle on new main, old bundle kept as pre-rebase, .out
      equals stdout; conflict exit 2; already on main exit 0; branch and main add the
      identical line so the rebased commit empties, exit 3; failing suite exit 4;
-     FT_WHOAMI=forge refused exit 1. Every refusal leaves the from-dev drop byte-identical.
+     FT_WHOAMI=forge refused exit 1; no committer identity in the environment still
+     rebases, keeping the old committer. Every refusal leaves the from-dev drop byte-identical.
 """
 import os
 import shutil
@@ -469,7 +470,7 @@ def drop_state(d):
     return {p.name: p.read_bytes() for p in sorted(Path(d).iterdir())}
 
 
-def rebase_case(branch_changes, main_changes, whoami="forgedev", b="feat"):
+def rebase_case(branch_changes, main_changes, whoami="forgedev", b="feat", no_ident=False):
     tmp = Path(tempfile.mkdtemp(prefix="test_ops_r."))
     repo = tmp / "src"
     new_repo(repo, {"tests/test_ok.py": OK_SUITE, "a.txt": "1\n2\n3\n"})
@@ -490,6 +491,10 @@ def rebase_case(branch_changes, main_changes, whoami="forgedev", b="feat"):
     env = base_env()
     env.update(FT_TODEV=str(todev), FT_FROMDEV=str(fromdev), FT_VENV=str(VENV),
                FT_WHOAMI=whoami, TMPDIR=str(tmpd))
+    if no_ident:
+        for k in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+                  "EMAIL"):
+            env.pop(k, None)
     rc, out = run(["bash", str(DEPLOY / "ops" / "rebase.sh"), b], cwd=tmp, env=env)
     res = {"rc": rc, "out": out, "L": lines(out), "old_tip": old_tip, "new_base": new_base,
            "before": before, "after": drop_state(fromdev), "left": os.listdir(tmpd)}
@@ -501,6 +506,7 @@ def rebase_case(branch_changes, main_changes, whoami="forgedev", b="feat"):
         res["new_tip"] = git(chk, "rev-parse", b)
         res["new_parent"] = git(chk, "rev-parse", f"{b}~1")
         res["new_a"] = git(chk, "show", f"{b}:a.txt")
+        res["new_committer"] = git(chk, "log", "-1", "--format=%cn %ce", b)
     shutil.rmtree(tmp)
     return res
 
@@ -559,6 +565,11 @@ check(r["L"][-1:] and r["L"][-1].startswith("RESULT FAIL suites_failed=1/2 new_t
 r = rebase_case([{"a.txt": "1\nTWO\n3\n"}], [{"b.txt": "b\n"}], whoami="forge")
 rebase_wrote_nothing("R6 not forgedev", r, 1)
 check(r["L"] == ["REFUSED: run as forgedev, not forge"], f"R6 lines: {r['L']}")
+
+r = rebase_case([{"a.txt": "1\nTWO\n3\n"}], [{"b.txt": "b\n"}], no_ident=True)
+check(r["rc"] == 0 and r["L"][-1:] == [f"RESULT PASS rebased new_tip={r.get('new_tip')}"],
+      f"R8 no committer identity in the environment: {r['rc']} {r['out']!r}")
+check(r.get("new_committer") == "t t@t", f"R8 committer not the old tip's: {r.get('new_committer')!r}")
 
 rsrc = (DEPLOY / "ops" / "rebase.sh").read_text()
 rcode = [x for x in rsrc.splitlines() if not x.lstrip().startswith("#")]

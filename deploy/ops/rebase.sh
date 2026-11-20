@@ -5,7 +5,7 @@
 # tests/test_*.py passes in the clone (venv linked as verify.sh does). Only then is the old
 # bundle kept as BRANCH.pre-rebase.bundle and the new one written and verified.
 # Exit: 0 PASS or ALREADY_ON_MAIN, 1 not forgedev, 2 conflict, 3 patch-id mismatch,
-# 4 failing suite, 5 setup or bundle error. On any non-PASS exit nothing is written.
+# 4 failing suite, 5 setup, non-conflict rebase or bundle error. On any non-PASS exit nothing is written.
 # FT_TODEV / FT_FROMDEV / FT_VENV / FT_WHOAMI are for tests only; production never sets them.
 # Never run with bash -x.
 set -u
@@ -38,9 +38,14 @@ say "new_base=$NEW_BASE"
 say "old_tip=$OLD_TIP"
 if [ "$OLD_BASE" = "$NEW_BASE" ]; then echo "ALREADY_ON_MAIN"; exit 0; fi
 OLD_PID=$(git diff "$OLD_BASE" "$OLD_TIP" | git patch-id --stable | cut -d' ' -f1)
+# A fresh clone has no identity; rebased commits keep the old tip's committer.
+[ -n "$(git config user.name)" ] || git config user.name "$(git log -1 --format=%cn "$OLD_TIP")"
+[ -n "$(git config user.email)" ] || git config user.email "$(git log -1 --format=%ce "$OLD_TIP")"
 if ! git rebase -q --onto "$NEW_BASE" "$OLD_BASE" "$B" >"$D/rebase.log" 2>&1; then
-  git diff --name-only --diff-filter=U | sed 's/^/conflict /' | tee -a "$OUT"
+  U=$(git diff --name-only --diff-filter=U)
   git rebase --abort >/dev/null 2>&1
+  if [ -z "$U" ]; then say "rebase: $(grep -m1 -E '^(fatal|error):' "$D/rebase.log")"; fail 5 rebase_failed; fi
+  printf '%s\n' "$U" | sed 's/^/conflict /' | tee -a "$OUT"
   fail 2 conflict
 fi
 NEW_TIP=$(git rev-parse HEAD)
