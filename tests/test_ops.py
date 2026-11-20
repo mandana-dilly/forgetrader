@@ -21,6 +21,11 @@ Never the network, never forge's home, never a real bundle drop.
      fast-forwarded, B not ff-able refused loudly; a failing suite sets
      suites_failed=1; SHA mismatch still refused before anything runs.
   L  deploy/ops/launch.sh --wait: the four ping texts; automerge runs only after PASS.
+  R  deploy/ops/rebase.sh (temp repo, temp to-dev and from-dev drops): clean rebase PASS
+     with equal patch-ids, new bundle on new main, old bundle kept as pre-rebase, .out
+     equals stdout; conflict exit 2; already on main exit 0; branch and main add the
+     identical line so the rebased commit empties, exit 3; failing suite exit 4;
+     FT_WHOAMI=forge refused exit 1. Every refusal leaves the from-dev drop byte-identical.
 """
 import os
 import shutil
@@ -457,6 +462,108 @@ check(am == [] and no == [f"[forgetrader] BUILD {b}: verify did not finish - pas
 for f in ("automerge.sh", "ops/launch.sh"):
     code = [x for x in (DEPLOY / f).read_text().splitlines() if not x.lstrip().startswith("#")]
     check(not any("push" in x for x in code), f"L5 {f} has a push")
+
+
+# ---------------------------------------------------------------- R ops/rebase.sh
+def drop_state(d):
+    return {p.name: p.read_bytes() for p in sorted(Path(d).iterdir())}
+
+
+def rebase_case(branch_changes, main_changes, whoami="forgedev", b="feat"):
+    tmp = Path(tempfile.mkdtemp(prefix="test_ops_r."))
+    repo = tmp / "src"
+    new_repo(repo, {"tests/test_ok.py": OK_SUITE, "a.txt": "1\n2\n3\n"})
+    todev, fromdev, tmpd = tmp / "todev", tmp / "fromdev", tmp / "tmpd"
+    for d in (todev, fromdev, tmpd):
+        d.mkdir()
+    git(repo, "checkout", "-q", "-b", b)
+    for ch in branch_changes:
+        commit(repo, ch, "branch")
+    old_tip = git(repo, "rev-parse", "HEAD")
+    git(repo, "checkout", "-q", "main")
+    git(repo, "bundle", "create", "-q", str(fromdev / f"{b}.bundle"), f"main..{b}")
+    for ch in main_changes:
+        commit(repo, ch, "main moves on")
+    new_base = git(repo, "rev-parse", "main")
+    git(repo, "bundle", "create", "-q", str(todev / "main.bundle"), "main")
+    before = drop_state(fromdev)
+    env = base_env()
+    env.update(FT_TODEV=str(todev), FT_FROMDEV=str(fromdev), FT_VENV=str(VENV),
+               FT_WHOAMI=whoami, TMPDIR=str(tmpd))
+    rc, out = run(["bash", str(DEPLOY / "ops" / "rebase.sh"), b], cwd=tmp, env=env)
+    res = {"rc": rc, "out": out, "L": lines(out), "old_tip": old_tip, "new_base": new_base,
+           "before": before, "after": drop_state(fromdev), "left": os.listdir(tmpd)}
+    nb = fromdev / f"{b}.bundle"
+    if res["after"] != before and nb.exists():
+        chk = tmp / "chk"
+        git(tmp, "clone", "-q", "-b", "main", str(todev / "main.bundle"), str(chk))
+        git(chk, "fetch", "-q", str(nb), f"{b}:{b}")
+        res["new_tip"] = git(chk, "rev-parse", b)
+        res["new_parent"] = git(chk, "rev-parse", f"{b}~1")
+        res["new_a"] = git(chk, "show", f"{b}:a.txt")
+    shutil.rmtree(tmp)
+    return res
+
+
+def field(L, key):
+    return next((x[len(key) + 1:] for x in L if x.startswith(key + "=")), None)
+
+
+def rebase_wrote_nothing(tag, r, rc):
+    check(r["rc"] == rc, f"{tag} exit {r['rc']} want {rc}: {r['out']!r}")
+    check(r["after"] == r["before"], f"{tag} drop changed: {sorted(r['after'])}")
+    check(r["left"] == [], f"{tag} temp clone left behind: {r['left']}")
+
+
+r = rebase_case([{"a.txt": "1\nTWO\n3\n"}], [{"b.txt": "b\n"}])
+L = r["L"]
+check(r["rc"] == 0, f"R1 clean rebase exit {r['rc']}: {r['out']!r}")
+check(L and L[0].startswith("=== rebase.sh feat 20") and L[0].endswith("Z"), f"R1 header: {L[:1]}")
+check(field(L, "new_base") == r["new_base"] and field(L, "old_tip") == r["old_tip"], f"R1 bases: {L}")
+check(field(L, "old_base") not in (None, r["new_base"]), f"R1 old_base: {L}")
+check(field(L, "old_patch_id") and field(L, "old_patch_id") == field(L, "new_patch_id"),
+      f"R1 patch-ids differ or empty: {L}")
+check("tests/test_ok.py exit=0 | PASS: ok" in L, f"R1 suite line: {L}")
+check(L[-1:] == [f"RESULT PASS rebased new_tip={r.get('new_tip')}"], f"R1 RESULT line: {L[-1:]}")
+check(field(L, "new_tip") == r.get("new_tip") and r.get("new_parent") == r["new_base"],
+      f"R1 new bundle tip not on new main: {r.get('new_tip')} parent {r.get('new_parent')}")
+check(r.get("new_a") == "1\nTWO\n3", f"R1 rebased content: {r.get('new_a')!r}")
+check(sorted(r["after"]) == ["feat.bundle", "feat.pre-rebase.bundle", "rebase_feat.out"],
+      f"R1 drop files: {sorted(r['after'])}")
+check(r["after"].get("feat.pre-rebase.bundle") == r["before"]["feat.bundle"], "R1 pre-rebase bundle is not the old one")
+check(r["after"].get("rebase_feat.out", b"").decode() == r["out"], "R1 .out differs from stdout")
+check(r["left"] == [], f"R1 temp clone left behind: {r['left']}")
+
+r = rebase_case([{"a.txt": "1\nBRANCH\n3\n"}], [{"a.txt": "1\nMAIN\n3\n"}])
+rebase_wrote_nothing("R2 conflict", r, 2)
+check("conflict a.txt" in r["L"] and r["L"][-1:] == ["RESULT FAIL conflict new_tip=none"],
+      f"R2 conflict lines: {r['L']}")
+
+r = rebase_case([{"a.txt": "1\nTWO\n3\n"}], [])
+rebase_wrote_nothing("R3 already on main", r, 0)
+check(r["L"][-1:] == ["ALREADY_ON_MAIN"], f"R3 lines: {r['L']}")
+
+r = rebase_case([{"a.txt": "1\n2\n3\n4\n"}], [{"a.txt": "1\n2\n3\n4\n"}])
+rebase_wrote_nothing("R4 patch-id mismatch", r, 3)
+check(field(r["L"], "old_patch_id") and field(r["L"], "new_patch_id") == ""
+      and field(r["L"], "new_tip") == r["new_base"], f"R4 rebased commit did not empty: {r['L']}")
+check(r["L"][-1:] == [f"RESULT FAIL patch_id_mismatch new_tip={r['new_base']}"], f"R4 RESULT: {r['L'][-1:]}")
+check(not any(" exit=" in x for x in r["L"]), f"R4 suites ran: {r['L']}")
+
+r = rebase_case([{"tests/test_bad.py": BAD_SUITE}], [{"b.txt": "b\n"}])
+rebase_wrote_nothing("R5 failing suite", r, 4)
+check("tests/test_bad.py exit=1 | FAIL: 1 failed of 1 assertions" in r["L"]
+      and "tests/test_ok.py exit=0 | PASS: ok" in r["L"], f"R5 suite lines: {r['L']}")
+check(r["L"][-1:] and r["L"][-1].startswith("RESULT FAIL suites_failed=1/2 new_tip="), f"R5 RESULT: {r['L'][-1:]}")
+
+r = rebase_case([{"a.txt": "1\nTWO\n3\n"}], [{"b.txt": "b\n"}], whoami="forge")
+rebase_wrote_nothing("R6 not forgedev", r, 1)
+check(r["L"] == ["REFUSED: run as forgedev, not forge"], f"R6 lines: {r['L']}")
+
+rsrc = (DEPLOY / "ops" / "rebase.sh").read_text()
+rcode = [x for x in rsrc.splitlines() if not x.lstrip().startswith("#")]
+check(not any("push" in x or "verify-" in x or "/wt/" in x or "/home/forge/" in x for x in rcode),
+      "R7 rebase.sh pushes or names ~/verify-*, ~/wt/* or forge's home")
 
 
 if failures:
