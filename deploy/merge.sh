@@ -3,13 +3,16 @@
 # deploy/suites.sh against the new main (D22a: no tests/ file runs as forge), refresh
 # forgedev's main, then fast-forward forgetrader-b if present. Never pushes:
 # git push origin main stays its own line (D8).
-# FT_FORGE_REPO / FT_FORGE_B / FT_TODEV / FT_SUDO are for tests only; production never sets them.
+# Refuses before anything runs unless SHA equals refs/dev/BRANCH, the recorded verified SHA,
+# AND the current tip of from-dev/BRANCH.bundle (a verify of a superseded bundle never merges).
+# FT_FORGE_REPO / FT_FORGE_B / FT_TODEV / FT_FROMDEV / FT_SUDO are for tests only; production never sets them.
 set -euo pipefail
 B=${1:?usage: merge.sh BRANCH SHA}; S=${2:?usage: merge.sh BRANCH SHA}
 [[ $B =~ ^[A-Za-z0-9._-]+$ && $S =~ ^[0-9a-f]{40}$ ]] || { echo "REFUSED: bad args"; exit 2; }
 REPO=${FT_FORGE_REPO:-/home/forge/forgetrader}
 REPO_B=${FT_FORGE_B:-/home/forge/forgetrader-b}
 TODEV=${FT_TODEV:-/srv/forgedrop/to-dev}
+BUNDLE=${FT_FROMDEV:-/srv/forgedrop/from-dev}/$B.bundle
 SUDO=${FT_SUDO:-sudo -u forgedev -H}
 cd "$REPO"
 [ "$(git rev-parse --abbrev-ref HEAD)" = main ] || { echo "REFUSED: not on main"; exit 3; }
@@ -17,6 +20,9 @@ cd "$REPO"
 R=$(git rev-parse "refs/dev/$B"); V=$(cat ".git/verified-$B" 2>/dev/null || echo none)
 echo "arg      $S"; echo "refs/dev $R"; echo "verified $V"
 [ "$S" = "$R" ] && [ "$S" = "$V" ] || { echo "REFUSED: SHA mismatch"; exit 3; }
+T=$(git bundle list-heads "$BUNDLE" "refs/heads/$B" 2>/dev/null | cut -d' ' -f1) || T=none
+echo "bundle   ${T:-none}"
+[ "$S" = "$T" ] || { echo "REFUSED: bundle tip ${T:-none} is not $S"; exit 3; }
 git merge -q --ff-only "$S"
 H=$(git rev-parse HEAD)
 echo "main now $H"

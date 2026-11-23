@@ -6,6 +6,10 @@
 # then prints log, stat and full diff of main...SHA. Records the SHA only on PASS.
 # Never executes branch code as forge. Never run with bash -x.
 # Each branch gets its own forgedev worktree ~/verify-BRANCH, so parallel waiters never share one.
+# Before the worktree, forgedev fetches BRANCH from the same bundle into FETCH_HEAD (never a
+# branch), so a tip that exists only in the bundle (e.g. after rebase.sh) verifies; refuses
+# unless the bundle tip is still exactly SHA. A suite passes only if it exits 0 AND its last
+# line starts with PASS.
 # FT_FORGE_REPO / FT_FROMDEV / FT_SUDO are for tests only; production never sets them.
 set -euo pipefail
 B=${1:?usage: verify.sh BRANCH}
@@ -25,8 +29,11 @@ echo "=== as forgedev"
 set +e
 ${FT_SUDO:-sudo -u forgedev -H} bash -c '
 set -u
-B=$1; S=$2; shift 2
+B=$1; S=$2; BUNDLE=$3; shift 3
 cd ~/forgetrader || exit 9
+git fetch -q --no-tags "$BUNDLE" "refs/heads/$B" || { echo "REFUSED: forgedev fetch of $BUNDLE failed"; exit 9; }
+T=$(git rev-parse -q --verify FETCH_HEAD) || T=none
+[ "$T" = "$S" ] || { echo "REFUSED: bundle tip $T is not $S"; exit 9; }
 git cat-file -e "$S^{commit}" || { echo "SHA not in forgedev repo"; exit 9; }
 git worktree remove --force ~/verify-$B >/dev/null 2>&1; rm -rf ~/verify-$B; git worktree prune
 git worktree add -q --detach ~/verify-$B "$S" || exit 9
@@ -36,7 +43,10 @@ echo "worktree HEAD: $(git rev-parse HEAD)"
 fail=0
 for t in tests/test_*.py; do
   .venv/bin/python "$t" >| /tmp/fd_t.out 2>&1; rc=$?
-  echo "$t exit=$rc | $(tail -1 /tmp/fd_t.out)"; [ $rc -eq 0 ] || fail=1
+  last=$(tail -1 /tmp/fd_t.out)
+  echo "$t exit=$rc | $last"
+  if [ $rc -ne 0 ]; then fail=1
+  elif [[ $last != PASS* ]]; then echo "$t: exit 0 without a PASS last line"; fail=1; fi
 done
 for f in "$@"; do
   if grep -nE "(/home/forgedev|~)/forgetrader" "$f"; then echo "FI $f: points at real clone, REFUSED"; fail=1; continue; fi
@@ -44,7 +54,7 @@ for f in "$@"; do
 done
 echo "tracked files changed after FI: $(git status --short --untracked-files=no | wc -l)"
 exit $fail
-' _ "$B" "$SHA" $FI
+' _ "$B" "$SHA" "$BUNDLE" $FI
 RC=$?
 set -e
 echo "=== diff stat"; git --no-pager diff --stat "main...$SHA"

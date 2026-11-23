@@ -5,7 +5,11 @@
 # tests/test_*.py passes in the clone (venv linked as verify.sh does). Only then is the old
 # bundle kept as BRANCH.pre-rebase.bundle and the new one written and verified.
 # Exit: 0 PASS or ALREADY_ON_MAIN, 1 not forgedev, 2 conflict, 3 patch-id mismatch,
-# 4 failing suite, 5 setup, non-conflict rebase or bundle error. On any non-PASS exit nothing is written.
+# 4 failing suite, 5 setup, non-conflict rebase or bundle error. A suite passes only if it
+# exits 0 AND its last line starts with PASS. Works from inside its mktemp dir, so any cwd
+# (even one forgedev cannot read) is fine. Every outcome past the identity and branch-name
+# checks overwrites FROMDEV/rebase_BRANCH.out with this run's report, so a stale PASS never
+# survives; on any non-PASS exit the bundles are untouched.
 # FT_TODEV / FT_FROMDEV / FT_VENV / FT_WHOAMI are for tests only; production never sets them.
 # Never run with bash -x.
 set -u
@@ -17,13 +21,15 @@ TODEV=${FT_TODEV:-/srv/forgedrop/to-dev}
 FROMDEV=${FT_FROMDEV:-/srv/forgedrop/from-dev}
 VENV=${FT_VENV:-/home/forgedev/forgetrader/.venv}
 BUNDLE=$FROMDEV/$B.bundle
-[ -s "$BUNDLE" ] || { echo "REFUSED: $BUNDLE missing"; exit 5; }
+OUTF=$FROMDEV/rebase_$B.out
 D=$(mktemp -d) || { echo "REFUSED: mktemp failed"; exit 5; }
-trap 'rm -rf "$D"' EXIT
 OUT=$D/report
+trap 'rc=$?; rm -f "$OUTF"; cp "$OUT" "$OUTF" || { echo "REFUSED: could not write $OUTF"; rc=5; }; rm -rf "$D"; exit $rc' EXIT
 say() { printf '%s\n' "$*" | tee -a "$OUT"; }
 fail() { say "RESULT FAIL $2 new_tip=${NEW_TIP:-none}"; exit "$1"; }
 say "=== rebase.sh $B $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+cd "$D" || fail 5 cd_tmp_failed
+[ -s "$BUNDLE" ] || fail 5 bundle_missing
 NEW_BASE=$(git bundle list-heads "$TODEV/main.bundle" refs/heads/main | cut -d' ' -f1)
 [ -n "$NEW_BASE" ] || fail 5 no_main_in_main.bundle
 git clone -q -b main "$TODEV/main.bundle" "$D/r" </dev/null || fail 5 clone_failed
@@ -36,7 +42,7 @@ OLD_BASE=$(git merge-base "$NEW_BASE" "$OLD_TIP") || fail 5 no_merge_base
 say "old_base=$OLD_BASE"
 say "new_base=$NEW_BASE"
 say "old_tip=$OLD_TIP"
-if [ "$OLD_BASE" = "$NEW_BASE" ]; then echo "ALREADY_ON_MAIN"; exit 0; fi
+if [ "$OLD_BASE" = "$NEW_BASE" ]; then say "ALREADY_ON_MAIN"; exit 0; fi
 OLD_PID=$(git diff "$OLD_BASE" "$OLD_TIP" | git patch-id --stable | cut -d' ' -f1)
 # A fresh clone has no identity; rebased commits keep the old tip's committer.
 [ -n "$(git config user.name)" ] || git config user.name "$(git log -1 --format=%cn "$OLD_TIP")"
@@ -60,8 +66,10 @@ for t in tests/test_*.py; do
   [ -e "$t" ] || continue
   n=$((n+1))
   .venv/bin/python "$t" </dev/null >| "$D/t.out" 2>&1; rc=$?
-  say "$t exit=$rc | $(tail -1 "$D/t.out")"
-  [ $rc -eq 0 ] || failed=$((failed+1))
+  last=$(tail -1 "$D/t.out")
+  say "$t exit=$rc | $last"
+  if [ $rc -ne 0 ]; then failed=$((failed+1))
+  elif [[ $last != PASS* ]]; then say "$t: exit 0 without a PASS last line"; failed=$((failed+1)); fi
 done
 [ $failed -eq 0 ] && [ $n -gt 0 ] || fail 4 "suites_failed=$failed/$n"
 git bundle create -q "$D/new.bundle" "main..$B" || fail 5 bundle_create_failed
@@ -70,4 +78,3 @@ mv -f "$BUNDLE" "$FROMDEV/$B.pre-rebase.bundle" || fail 5 move_failed
 cp "$D/new.bundle" "$BUNDLE" || fail 5 bundle_write_failed
 git bundle verify -q "$BUNDLE" >/dev/null 2>&1 || fail 5 bundle_verify_failed
 say "RESULT PASS rebased new_tip=$NEW_TIP"
-cp "$OUT" "$FROMDEV/rebase_$B.out"

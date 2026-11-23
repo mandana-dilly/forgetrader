@@ -3,6 +3,7 @@
 # Invoked as: sudo -u forgedev -H bash -s -- SHA < deploy/suites.sh
 # The script itself arrives on stdin, so every python call reads </dev/null.
 # Refuses (exit 2) unless SHA is 40 hex and the clone's HEAD is exactly SHA.
+# A suite passes only if it exits 0 AND its last line starts with PASS.
 # Never reads anything under forge's home. FT_TODEV / FT_VENV are for tests only:
 # production never sets them (and sudo resets the environment). Never run with bash -x.
 set -u
@@ -24,8 +25,10 @@ for t in tests/test_*.py; do
   [ -e "$t" ] || continue
   n=$((n+1))
   .venv/bin/python "$t" </dev/null >| "$D/t.out" 2>&1; rc=$?
-  echo "$t exit=$rc | $(tail -1 "$D/t.out")"
-  [ $rc -eq 0 ] || failed=$((failed+1))
+  last=$(tail -1 "$D/t.out")
+  echo "$t exit=$rc | $last"
+  if [ $rc -ne 0 ]; then failed=$((failed+1))
+  elif [[ $last != PASS* ]]; then echo "$t: exit 0 without a PASS last line"; failed=$((failed+1)); fi
 done
 if [ $failed -eq 0 ] && [ $n -gt 0 ]; then echo "=== SUITES PASS n=$n"; exit 0; fi
 echo "=== SUITES FAIL n=$n failed=$failed"

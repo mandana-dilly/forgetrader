@@ -13,20 +13,30 @@ Never the network, never forge's home, never a real bundle drop.
   S  deploy/suites.sh: refuses a wrong SHA and a non-hex SHA (exit 2, no suite run);
      PASS line counts suites; one failing suite gives the FAIL line and a non-zero
      exit; every suite reads an empty stdin (the script arrives on stdin); the temp
-     clone is removed; the script names nothing under forge's home.
+     clone is removed; the script names nothing under forge's home; a suite that exits 0
+     whose last line is not PASS (empty, or text) fails the run (S7).
   V  deploy/verify.sh: per-branch forgedev worktree ~/verify-BRANCH, two branches keep
-     two worktrees, no ~/verify.
+     two worktrees, no ~/verify. A tip that exists only in the bundle (rebased elsewhere)
+     verifies, fetched into FETCH_HEAD only (V3); a bundle replaced between forge's fetch
+     and forgedev's is refused, nothing recorded, no worktree (V4); a suite with exit 0
+     and an empty last line fails the run, nothing recorded (V5).
   M  deploy/merge.sh: every suite runs through the sudo prefix (spy), none as the
      invoking user; main.bundle and forgedev main at the new HEAD; B absent, B
      fast-forwarded, B not ff-able refused loudly; a failing suite sets
-     suites_failed=1; SHA mismatch still refused before anything runs.
+     suites_failed=1; SHA mismatch still refused before anything runs; a from-dev bundle
+     whose tip is not SHA (superseded) or a missing bundle is refused before anything
+     runs (M7, M8).
   L  deploy/ops/launch.sh --wait: the four ping texts; automerge runs only after PASS.
   R  deploy/ops/rebase.sh (temp repo, temp to-dev and from-dev drops): clean rebase PASS
      with equal patch-ids, new bundle on new main, old bundle kept as pre-rebase, .out
      equals stdout; conflict exit 2; already on main exit 0; branch and main add the
      identical line so the rebased commit empties, exit 3; failing suite exit 4;
      FT_WHOAMI=forge refused exit 1; no committer identity in the environment still
-     rebases, keeping the old committer. Every refusal leaves the from-dev drop byte-identical.
+     rebases, keeping the old committer. Every refusal after the identity check leaves
+     the bundles byte-identical and writes rebase_BRANCH.out equal to stdout, overwriting a
+     stale PASS (R2-R5, R10-R12); the identity refusal writes nothing. Started from a cwd
+     forgedev cannot read it still rebases (R9); exit 0 without a PASS last line is a
+     failing suite (R11); a missing bundle is refused with bundle_missing (R12).
 """
 import os
 import shutil
@@ -100,6 +110,8 @@ def lines(out):
 
 
 OK_SUITE = 'print("PASS: ok")\n'
+NOPASS_SUITE = 'print("PASS: looks fine")\nprint()\n'
+TEXT_SUITE = 'print("all good")\n'
 BAD_SUITE = 'import sys\nprint("FAIL: 1 failed of 1 assertions")\nsys.exit(1)\n'
 STDIN_SUITE = ('import sys\ndata = sys.stdin.read()\n'
                'print("PASS: stdin empty" if data == "" else "FAIL: stdin not empty")\n'
@@ -297,6 +309,17 @@ check("/home/forge/" not in src and "/home/forge\n" not in src and "~forge" not 
 py = [x for x in src.splitlines() if "python" in x and not x.lstrip().startswith("#")]
 check(py and all("</dev/null" in x for x in py), f"S6 python call without </dev/null: {py}")
 
+rc, out, head, left = suites_case(dict(GOOD, **{"tests/test_nopass.py": NOPASS_SUITE,
+                                                "tests/test_text.py": TEXT_SUITE}))
+L = lines(out)
+check(rc == 1, f"S7 exit-0-without-PASS exit {rc}: {out!r}")
+check("tests/test_nopass.py exit=0 | " in L and "tests/test_nopass.py: exit 0 without a PASS last line" in L,
+      f"S7 empty last line not named: {L}")
+check("tests/test_text.py exit=0 | all good" in L and "tests/test_text.py: exit 0 without a PASS last line" in L,
+      f"S7 text last line not named: {L}")
+check(L[-1:] == ["=== SUITES FAIL n=4 failed=2"], f"S7 FAIL line: {L[-1:]}")
+check(not any(x.startswith("=== SUITES PASS") for x in L), "S7 PASS line printed")
+
 
 # ---------------------------------------------------------------- V verify.sh
 def verify_setup(tmp):
@@ -342,8 +365,68 @@ check((forge / ".git" / "verified-b-two").read_text().strip() == sha2, "V2 verif
 shutil.rmtree(tmp)
 
 
+def bundle_elsewhere(tmp, forge, b, files, dest):
+    # Build branch b in a throwaway clone of forge (never forgedev's clone), bundle it, drop the clone.
+    w = Path(tempfile.mkdtemp(prefix="w.", dir=tmp))
+    git(tmp, "clone", "-q", str(forge), str(w / "r"))
+    git(w / "r", "checkout", "-q", "-b", b)
+    sha = commit(w / "r", files, b)
+    git(w / "r", "bundle", "create", "-q", str(dest), f"main..{b}")
+    shutil.rmtree(w)
+    return sha
+
+
+def verify_run(tmp, forge, home, fromdev, b, sudo=None):
+    env = base_env()
+    env.update(FT_FORGE_REPO=str(forge), FT_FROMDEV=str(fromdev), FT_SUDO=sudo or f"env HOME={home}")
+    return run(["bash", str(DEPLOY / "verify.sh"), b], cwd=tmp, env=env)
+
+
+tmp = Path(tempfile.mkdtemp(prefix="test_ops_v."))
+forge, home, clone, fromdev = verify_setup(tmp)
+fd_main, fd_head = git(clone, "rev-parse", "main"), git(clone, "symbolic-ref", "HEAD")
+sha = bundle_elsewhere(tmp, forge, "rb", {"tests/test_rb.py": OK_SUITE}, fromdev / "rb.bundle")
+check(run(["git", "-C", str(clone), "cat-file", "-e", sha + "^{commit}"])[0] != 0, "V3 setup: tip already in forgedev")
+rc, out = verify_run(tmp, forge, home, fromdev, "rb")
+check(rc == 0 and f"=== RESULT PASS recorded {sha}" in lines(out), f"V3 bundle-only tip did not verify: {rc} {out!r}")
+check(f"worktree HEAD: {sha}" in lines(out), f"V3 worktree HEAD line: {out!r}")
+check(git(clone, "for-each-ref", "--format=%(refname)", "refs/heads/") == "refs/heads/main",
+      "V3 forgedev fetch created a branch")
+check(git(clone, "rev-parse", "main") == fd_main and git(clone, "symbolic-ref", "HEAD") == fd_head,
+      "V3 forgedev main or checked-out branch moved")
+check(run(["git", "-C", str(clone), "rev-parse", "-q", "--verify", "FETCH_HEAD"])[1].strip() == sha,
+      "V3 bundle not fetched into FETCH_HEAD")
+
+# V4: the bundle is replaced after forge's fetch, before forgedev's (the swap runs in the sudo prefix).
+old = bundle_elsewhere(tmp, forge, "sw", {"tests/test_sw.py": OK_SUITE}, fromdev / "sw.bundle")
+new = bundle_elsewhere(tmp, forge, "sw", {"tests/test_sw.py": 'print("PASS: v2")\n'}, tmp / "sw.new.bundle")
+swap = tmp / "swap.sh"
+swap.write_text(f'cp "{tmp}/sw.new.bundle" "{fromdev}/sw.bundle"\nexec env HOME="{home}" "$@"\n')
+rc, out = verify_run(tmp, forge, home, fromdev, "sw", sudo=f"bash {swap}")
+L = lines(out)
+check(rc == 0 and f"REFUSED: bundle tip {new} is not {old}" in L, f"V4 swapped bundle not refused: {rc} {out!r}")
+check("=== RESULT FAIL rc=9, nothing recorded" in L and not (forge / ".git" / "verified-sw").exists(),
+      f"V4 something recorded: {L[-1:]}")
+check(not (home / "verify-sw").exists() and not any(x.startswith("worktree HEAD") for x in L),
+      "V4 worktree created after refusal")
+
+# V5 builds in forgedev's clone, so only the PASS-line rule can fail it.
+git(clone, "checkout", "-q", "-b", "np", "main")
+commit(clone, {"tests/test_np.py": NOPASS_SUITE}, "np")
+git(clone, "checkout", "-q", "main")
+git(clone, "bundle", "create", "-q", str(fromdev / "np.bundle"), "main..np")
+rc, out = verify_run(tmp, forge, home, fromdev, "np")
+L = lines(out)
+check("tests/test_np.py exit=0 | " in L and "tests/test_np.py: exit 0 without a PASS last line" in L,
+      f"V5 empty last line not named: {L}")
+check("tests/test_ok.py exit=0 | PASS: ok" in L, f"V5 ok suite line: {L}")
+check("=== RESULT FAIL rc=1, nothing recorded" in L and not (forge / ".git" / "verified-np").exists(),
+      f"V5 recorded a PASS: {L[-1:]}")
+shutil.rmtree(tmp)
+
+
 # ---------------------------------------------------------------- M merge.sh
-def merge_case(branch_files, b_mode="absent", mismatch=False):
+def merge_case(branch_files, b_mode="absent", mismatch=False, bundle="same"):
     tmp = Path(tempfile.mkdtemp(prefix="test_ops_m."))
     forge = tmp / "forge"
     base = new_repo(forge, {"tests/test_spy.py": SPY_SUITE,
@@ -357,8 +440,15 @@ def merge_case(branch_files, b_mode="absent", mismatch=False):
         if b_mode == "diverged":
             commit(repo_b, {"local.txt": "l\n"}, "local")
     b_before = git(repo_b, "rev-parse", "HEAD") if b_mode != "absent" else None
-    git(forge, "checkout", "-q", "-b", "dev")
+    git(forge, "checkout", "-q", "-b", "feat")
     sha = commit(forge, branch_files, "branch")
+    if bundle == "superseded":
+        commit(forge, {"later.txt": "l\n"}, "superseding commit")
+    fromdev = tmp / "fromdev"
+    fromdev.mkdir()
+    if bundle != "missing":
+        git(forge, "bundle", "create", "-q", str(fromdev / "feat.bundle"), "main..feat")
+    bundle_tip = git(forge, "rev-parse", "feat")
     git(forge, "checkout", "-q", "main")
     git(forge, "update-ref", "refs/dev/feat", sha)
     (forge / ".git" / "verified-feat").write_text((base if mismatch else sha) + "\n")
@@ -367,9 +457,11 @@ def merge_case(branch_files, b_mode="absent", mismatch=False):
     spy = tmp / "spy.log"
     env = base_env()
     env.update(FT_FORGE_REPO=str(forge), FT_FORGE_B=str(repo_b), FT_TODEV=str(todev),
-               FT_VENV=str(VENV), FT_SUDO=f"env SPY_AS=forgedev HOME={home}", SPY_LOG=str(spy))
+               FT_FROMDEV=str(fromdev), FT_VENV=str(VENV),
+               FT_SUDO=f"env SPY_AS=forgedev HOME={home}", SPY_LOG=str(spy))
     rc, out = run(["bash", str(DEPLOY / "merge.sh"), "feat", sha], cwd=tmp, env=env)
-    res = {"rc": rc, "out": out, "sha": sha, "base": base,
+    res = {"rc": rc, "out": out, "sha": sha, "base": base, "bundle_tip": bundle_tip,
+           "todev": os.listdir(todev),
            "spy": spy.read_text().splitlines() if spy.exists() else [],
            "main": git(forge, "rev-parse", "main"),
            "fd_main": git(home / "forgetrader", "rev-parse", "main"),
@@ -414,6 +506,19 @@ check(r["spy"] == ["forgedev test_spy.py"], f"M4 spy {r['spy']}")
 r = merge_case({"tests/test_spy2.py": SPY_SUITE}, mismatch=True)
 check(r["rc"] == 3 and "REFUSED: SHA mismatch" in lines(r["out"]), f"M5 mismatch: {r['rc']} {r['out']!r}")
 check(r["spy"] == [] and r["main"] == r["base"], "M5 something ran after a mismatch")
+
+r = merge_case({"tests/test_spy2.py": SPY_SUITE}, bundle="superseded")
+L = lines(r["out"])
+check(r["bundle_tip"] != r["sha"], "M7 setup: bundle tip equals SHA")
+check(r["rc"] == 3 and L[-2:] == [f"bundle   {r['bundle_tip']}", f"REFUSED: bundle tip {r['bundle_tip']} is not {r['sha']}"],
+      f"M7 superseded bundle not refused: {r['rc']} {r['out']!r}")
+check(r["spy"] == [] and r["main"] == r["base"] and r["todev"] == [], "M7 something ran after the refusal")
+
+r = merge_case({"tests/test_spy2.py": SPY_SUITE}, bundle="missing")
+L = lines(r["out"])
+check(r["rc"] == 3 and L[-1:] == [f"REFUSED: bundle tip none is not {r['sha']}"],
+      f"M8 missing bundle not refused: {r['rc']} {r['out']!r}")
+check(r["spy"] == [] and r["main"] == r["base"] and r["todev"] == [], "M8 something ran after the refusal")
 
 msrc = (DEPLOY / "merge.sh").read_text()
 mcode = "\n".join(x for x in msrc.splitlines() if not x.lstrip().startswith("#"))
@@ -470,7 +575,8 @@ def drop_state(d):
     return {p.name: p.read_bytes() for p in sorted(Path(d).iterdir())}
 
 
-def rebase_case(branch_changes, main_changes, whoami="forgedev", b="feat", no_ident=False):
+def rebase_case(branch_changes, main_changes, whoami="forgedev", b="feat", no_ident=False,
+                stale_out=None, locked_cwd=False, no_bundle=False):
     tmp = Path(tempfile.mkdtemp(prefix="test_ops_r."))
     repo = tmp / "src"
     new_repo(repo, {"tests/test_ok.py": OK_SUITE, "a.txt": "1\n2\n3\n"})
@@ -487,6 +593,10 @@ def rebase_case(branch_changes, main_changes, whoami="forgedev", b="feat", no_id
         commit(repo, ch, "main moves on")
     new_base = git(repo, "rev-parse", "main")
     git(repo, "bundle", "create", "-q", str(todev / "main.bundle"), "main")
+    if no_bundle:
+        (fromdev / f"{b}.bundle").unlink()
+    if stale_out is not None:
+        (fromdev / f"rebase_{b}.out").write_text(stale_out)
     before = drop_state(fromdev)
     env = base_env()
     env.update(FT_TODEV=str(todev), FT_FROMDEV=str(fromdev), FT_VENV=str(VENV),
@@ -495,7 +605,16 @@ def rebase_case(branch_changes, main_changes, whoami="forgedev", b="feat", no_id
         for k in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
                   "EMAIL"):
             env.pop(k, None)
-    rc, out = run(["bash", str(DEPLOY / "ops" / "rebase.sh"), b], cwd=tmp, env=env)
+    if locked_cwd:
+        # Like sudo from forge's home: the cwd exists but forgedev cannot read the path to it.
+        cwd = tmp / "locked" / "cwd"
+        cwd.mkdir(parents=True)
+        rc, out = run(["bash", "-c", 'chmod 000 "$1" && exec bash "$2" "$3"', "_",
+                       str(tmp / "locked"), str(DEPLOY / "ops" / "rebase.sh"), b], cwd=cwd, env=env)
+        os.chmod(tmp / "locked", 0o755)
+        shutil.rmtree(tmp / "locked")
+    else:
+        rc, out = run(["bash", str(DEPLOY / "ops" / "rebase.sh"), b], cwd=tmp, env=env)
     res = {"rc": rc, "out": out, "L": lines(out), "old_tip": old_tip, "new_base": new_base,
            "before": before, "after": drop_state(fromdev), "left": os.listdir(tmpd)}
     nb = fromdev / f"{b}.bundle"
@@ -515,9 +634,17 @@ def field(L, key):
     return next((x[len(key) + 1:] for x in L if x.startswith(key + "=")), None)
 
 
-def rebase_wrote_nothing(tag, r, rc):
+def bundles(state):
+    return {k: v for k, v in state.items() if k.endswith(".bundle")}
+
+
+def rebase_refused(tag, r, rc, b="feat"):
+    # Bundles byte-identical; rebase_BRANCH.out is this run's report (stdout), nothing else written.
     check(r["rc"] == rc, f"{tag} exit {r['rc']} want {rc}: {r['out']!r}")
-    check(r["after"] == r["before"], f"{tag} drop changed: {sorted(r['after'])}")
+    check(bundles(r["after"]) == bundles(r["before"]), f"{tag} bundles changed: {sorted(r['after'])}")
+    check(sorted(r["after"]) == sorted(set(bundles(r["before"])) | {f"rebase_{b}.out"}),
+          f"{tag} drop files: {sorted(r['after'])}")
+    check(r["after"].get(f"rebase_{b}.out", b"").decode() == r["out"], f"{tag} .out differs from stdout")
     check(r["left"] == [], f"{tag} temp clone left behind: {r['left']}")
 
 
@@ -541,35 +668,58 @@ check(r["after"].get("rebase_feat.out", b"").decode() == r["out"], "R1 .out diff
 check(r["left"] == [], f"R1 temp clone left behind: {r['left']}")
 
 r = rebase_case([{"a.txt": "1\nBRANCH\n3\n"}], [{"a.txt": "1\nMAIN\n3\n"}])
-rebase_wrote_nothing("R2 conflict", r, 2)
+rebase_refused("R2 conflict", r, 2)
 check("conflict a.txt" in r["L"] and r["L"][-1:] == ["RESULT FAIL conflict new_tip=none"],
       f"R2 conflict lines: {r['L']}")
 
 r = rebase_case([{"a.txt": "1\nTWO\n3\n"}], [])
-rebase_wrote_nothing("R3 already on main", r, 0)
+rebase_refused("R3 already on main", r, 0)
 check(r["L"][-1:] == ["ALREADY_ON_MAIN"], f"R3 lines: {r['L']}")
 
 r = rebase_case([{"a.txt": "1\n2\n3\n4\n"}], [{"a.txt": "1\n2\n3\n4\n"}])
-rebase_wrote_nothing("R4 patch-id mismatch", r, 3)
+rebase_refused("R4 patch-id mismatch", r, 3)
 check(field(r["L"], "old_patch_id") and field(r["L"], "new_patch_id") == ""
       and field(r["L"], "new_tip") == r["new_base"], f"R4 rebased commit did not empty: {r['L']}")
 check(r["L"][-1:] == [f"RESULT FAIL patch_id_mismatch new_tip={r['new_base']}"], f"R4 RESULT: {r['L'][-1:]}")
 check(not any(" exit=" in x for x in r["L"]), f"R4 suites ran: {r['L']}")
 
 r = rebase_case([{"tests/test_bad.py": BAD_SUITE}], [{"b.txt": "b\n"}])
-rebase_wrote_nothing("R5 failing suite", r, 4)
+rebase_refused("R5 failing suite", r, 4)
 check("tests/test_bad.py exit=1 | FAIL: 1 failed of 1 assertions" in r["L"]
       and "tests/test_ok.py exit=0 | PASS: ok" in r["L"], f"R5 suite lines: {r['L']}")
 check(r["L"][-1:] and r["L"][-1].startswith("RESULT FAIL suites_failed=1/2 new_tip="), f"R5 RESULT: {r['L'][-1:]}")
 
 r = rebase_case([{"a.txt": "1\nTWO\n3\n"}], [{"b.txt": "b\n"}], whoami="forge")
-rebase_wrote_nothing("R6 not forgedev", r, 1)
+check(r["rc"] == 1 and r["after"] == r["before"], f"R6 not forgedev wrote to the drop: {r['rc']} {sorted(r['after'])}")
 check(r["L"] == ["REFUSED: run as forgedev, not forge"], f"R6 lines: {r['L']}")
 
 r = rebase_case([{"a.txt": "1\nTWO\n3\n"}], [{"b.txt": "b\n"}], no_ident=True)
 check(r["rc"] == 0 and r["L"][-1:] == [f"RESULT PASS rebased new_tip={r.get('new_tip')}"],
       f"R8 no committer identity in the environment: {r['rc']} {r['out']!r}")
 check(r.get("new_committer") == "t t@t", f"R8 committer not the old tip's: {r.get('new_committer')!r}")
+
+r = rebase_case([{"a.txt": "1\nTWO\n3\n"}], [{"b.txt": "b\n"}], locked_cwd=True)
+L = r["L"]
+check(r["rc"] == 0 and L[-1:] == [f"RESULT PASS rebased new_tip={r.get('new_tip')}"],
+      f"R9 started from an unreadable cwd: {r['rc']} {r['out']!r}")
+check(r.get("new_parent") == r["new_base"] and r["after"].get("rebase_feat.out", b"").decode() == r["out"],
+      f"R9 new bundle or .out wrong: parent {r.get('new_parent')}")
+
+STALE = "=== rebase.sh feat stale\nRESULT PASS rebased new_tip=stale\n"
+r = rebase_case([{"a.txt": "1\nBRANCH\n3\n"}], [{"a.txt": "1\nMAIN\n3\n"}], stale_out=STALE)
+rebase_refused("R10 FAIL overwrites a stale PASS", r, 2)
+check(b"RESULT PASS" not in r["after"].get("rebase_feat.out", b"RESULT PASS")
+      and r["L"][-1:] == ["RESULT FAIL conflict new_tip=none"], f"R10 stale PASS survived: {r['after'].get('rebase_feat.out')!r}")
+
+r = rebase_case([{"tests/test_np.py": NOPASS_SUITE}], [{"b.txt": "b\n"}], stale_out=STALE)
+rebase_refused("R11 exit 0 without PASS", r, 4)
+check("tests/test_np.py exit=0 | " in r["L"] and "tests/test_np.py: exit 0 without a PASS last line" in r["L"],
+      f"R11 suite lines: {r['L']}")
+check(r["L"][-1:] and r["L"][-1].startswith("RESULT FAIL suites_failed=1/2 new_tip="), f"R11 RESULT: {r['L'][-1:]}")
+
+r = rebase_case([{"a.txt": "1\nTWO\n3\n"}], [{"b.txt": "b\n"}], no_bundle=True, stale_out=STALE)
+rebase_refused("R12 bundle missing", r, 5)
+check(r["L"][-1:] == ["RESULT FAIL bundle_missing new_tip=none"], f"R12 RESULT: {r['L']}")
 
 rsrc = (DEPLOY / "ops" / "rebase.sh").read_text()
 rcode = [x for x in rsrc.splitlines() if not x.lstrip().startswith("#")]
@@ -582,4 +732,4 @@ if failures:
         print("  " + f)
     print(f"FAIL: {len(failures)} failed of {n} assertions")
     raise SystemExit(1)
-print(f"PASS: test_ops automerge + suites + verify + merge + launch, {n} assertions")
+print(f"PASS: test_ops automerge + suites + verify + merge + launch + rebase, {n} assertions")
