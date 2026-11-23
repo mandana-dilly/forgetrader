@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Journal-vs-broker order report (funding criterion 3). Read-only.
+"""Journal-vs-broker order and activity report (funding criterion 3). Read-only.
 
   python -m forgetrader.journal_report [--since YYYY-MM-DD] DIR
 
@@ -26,9 +26,39 @@ installed alpaca-py documents a max of 500), each next page from the last
 page's latest submitted_at minus PAGE_OVERLAP, deduplicated by order id, until
 a page comes back short. A full page with no new order is an error.
 
---since D keeps journal orders whose first row ts and broker orders whose
-submitted_at are at or after D 00:00 UTC. An order journalled just before
-midnight UTC and submitted just after it (or the reverse) reports one-sided.
+Activities: alpaca-py 0.43.5 TradingClient has no activities method (only
+BrokerClient does, on the Broker API), so the report makes one read through
+the client's own REST get on ACTIVITIES_PATH with the documented params
+direction asc, page_size ACTIVITY_PAGE_SIZE (documented max 100), page_token
+= the last activity id of the previous page, and with --since, after = D
+minus ACTIVITY_LAG as YYYY-MM-DD. No activity_types filter is sent (not
+documented for this path in the installed SDK): every activity is listed and
+the types in ACTIVITY_TYPES (alpaca.trading.enums.ActivityType OPASN, OPEXP,
+OPEXC, OPTRD) are kept. Pages are deduplicated by id until an empty page; a
+non-empty page with no new id is an error.
+
+Journal transitions: every decisions row whose (stage_from, stage_to) is a
+legal transition out of CSP_OPEN or CC_OPEN (forgetrader_state's
+LEGAL_TRANSITIONS; the four keys of EXPECTED_ACTIVITY) is one transition. Its
+contract is the symbol of the journal order whose resolving decision moved
+the wheel into that OPEN stage, after the previous exit from it; none found
+is contract "-" (it cannot match). Expected broker type:
+  CSP_OPEN to HOLDING (assigned)            OPASN
+  CSP_OPEN to FLAT (expired_worthless)      OPEXP
+  CC_OPEN to FLAT (called_away)             OPASN
+  CC_OPEN to HOLDING (cc_expired_worthless) OPEXP
+Each transition, in ts order, pairs with the first unpaired OPASN / OPEXP /
+OPEXC activity (date, id order) carrying the same contract symbol. An OPTRD
+(symbol = the underlying, the paired share trade) attaches to the OPASN or
+OPEXC of the same date whose contract root is its symbol, and is shown on
+that line as share_qty / share_price.
+
+--since D keeps journal orders whose first row ts, broker orders whose
+submitted_at, transitions whose decision ts are at or after D 00:00 UTC, and
+activities whose date is on or after D. An order journalled just before
+midnight UTC and submitted just after it (or the reverse) reports one-sided;
+so does a transition journalled a day after its activity date (paper NTAs
+lag about a day) when D falls between them.
 
 Per order one ORDER line: coid, symbol, side, qty, limit, journal status,
 broker status, filled qty, filled avg price, flags. Journal values are shown
@@ -47,8 +77,18 @@ shows broker_<field>. Flags:
                      ("new", "accepted", ...) is an earlier observation, not
                      a contradiction.
 
-Last line: REPORT <label> orders=N matched=M discrepancies=K
-  N = ORDER lines, M = coids present on both sides, K = lines with any flag.
+Per transition or unpaired activity one ACTIVITY line: symbol, from, to,
+trigger, journal ts, expected type, broker type, broker date, broker qty,
+share qty, share price, flags. Flags:
+  TRANSITION_ONLY    journalled transition, no activity for its contract
+  ACTIVITY_ONLY      an OPASN / OPEXP / OPEXC with no transition, or an OPTRD
+                     with no OPASN / OPEXC to pair with
+  MISMATCH:type      paired, but the broker type is not the expected one
+
+Last line: REPORT <label> orders=N matched=M activities=A
+           activities_matched=P discrepancies=K
+  N = ORDER lines, M = coids present on both sides, A = ACTIVITY lines,
+  P = transitions paired with an activity, K = lines (both kinds) with any flag.
 Exit 0 only if K == 0; 3 if K > 0; 1 on any error or refusal (argparse
 errors included). Never prints a key, token or URL: an exception prints its
 type name only.
@@ -58,10 +98,12 @@ import json
 import re
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
+
+from alpaca.trading.enums import ActivityType
 
 import forgetrader_state as fs
 
@@ -71,6 +113,25 @@ TERMINAL = frozenset({"filled", "canceled", "expired", "rejected", "replaced"})
 PENDING_STAGES = (fs.CSP_PENDING, fs.CC_PENDING)
 FIELDS = ("symbol", "side", "qty", "limit")
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+ACTIVITIES_PATH = "/account/activities"
+ACTIVITY_PAGE_SIZE = 100  # documented max page_size (ACCOUNT_ACTIVITIES_DEFAULT_PAGE_SIZE)
+ACTIVITY_LAG = timedelta(days=1)
+OPTION_EVENTS = (ActivityType.OPASN, ActivityType.OPEXP, ActivityType.OPEXC)
+SHARE_TRADE = ActivityType.OPTRD
+ACTIVITY_TYPES = frozenset(t.value for t in (*OPTION_EVENTS, SHARE_TRADE))
+OPEN_STAGES = (fs.CSP_OPEN, fs.CC_OPEN)
+EXPECTED_ACTIVITY = {
+    (fs.CSP_OPEN, fs.HOLDING): ActivityType.OPASN.value,  # put assigned
+    (fs.CSP_OPEN, fs.FLAT): ActivityType.OPEXP.value,     # put expired
+    (fs.CC_OPEN, fs.FLAT): ActivityType.OPASN.value,      # called away
+    (fs.CC_OPEN, fs.HOLDING): ActivityType.OPEXP.value,   # call expired
+}
+TRIGGERS = {(f, t): trig for (f, trig), t in fs.LEGAL_TRANSITIONS.items()
+            if f in OPEN_STAGES}
+if set(TRIGGERS) != set(EXPECTED_ACTIVITY):
+    raise RuntimeError("LEGAL_TRANSITIONS out of an OPEN stage changed: "
+                       "EXPECTED_ACTIVITY needs review")
 _NO_REDIRECT = str.maketrans({"<": "_", ">": "_"})
 
 
@@ -137,10 +198,9 @@ def _read_journal(path):
     return orders, decisions
 
 
-def journal_orders(orders, decisions, since=None):
-    """{coid: entry} for journalled orders, plus a list of entries for rows
-    without a client_order_id. Entry: symbol, side, qty, limit, status,
-    source, ts."""
+def _resolve_orders(orders, decisions):
+    """journal_orders before the --since filter. A decision-resolved entry
+    also carries resolved_to / resolved_ts (the stage and ts it moved to)."""
     by_coid, no_coid = {}, []
     for r in orders:
         if r["client_order_id"] is None:
@@ -175,16 +235,51 @@ def journal_orders(orders, decisions, since=None):
                 st = snap.get("pending_order_status") if isinstance(snap, dict) else None
                 if isinstance(st, str):
                     e["status"], e["source"] = st, "decision"
+                e["resolved_to"], e["resolved_ts"] = d["stage_to"], t
                 break
+    return by_coid, no_coid
 
+
+def journal_orders(orders, decisions, since=None):
+    """{coid: entry} for journalled orders, plus a list of entries for rows
+    without a client_order_id. Entry: symbol, side, qty, limit, status,
+    source, ts."""
+    by_coid, no_coid = _resolve_orders(orders, decisions)
     if since is not None:
         by_coid = {k: e for k, e in by_coid.items() if e["ts"] >= since}
         no_coid = [e for e in no_coid if e["ts"] >= since]
     return by_coid, no_coid
 
 
+def journal_transitions(orders, decisions, since=None):
+    """Transitions out of CSP_OPEN / CC_OPEN, in ts order: dicts rowid, ts,
+    stage_from, stage_to, trigger, expected, contract (None if no opening
+    order is journalled since the previous exit from that stage)."""
+    by_coid, _ = _resolve_orders(orders, decisions)
+    opens = sorted((e["resolved_ts"], e["resolved_to"], e["symbol"])
+                   for e in by_coid.values() if e.get("resolved_to") in OPEN_STAGES)
+    out, last_exit = [], {}
+    for t, d in sorted(((_ts(d["ts"]), d) for d in decisions),
+                       key=lambda x: (x[0], x[1]["rowid"])):
+        key = (d["stage_from"], d["stage_to"])
+        if key not in EXPECTED_ACTIVITY:
+            continue
+        floor = last_exit.get(d["stage_from"])
+        contract = None
+        for ot, stage, sym in opens:
+            if stage == d["stage_from"] and ot <= t and (floor is None or ot > floor):
+                contract = sym
+        last_exit[d["stage_from"]] = t
+        out.append({"rowid": d["rowid"], "ts": t, "stage_from": key[0],
+                    "stage_to": key[1], "trigger": TRIGGERS[key],
+                    "expected": EXPECTED_ACTIVITY[key], "contract": contract})
+    if since is not None:
+        out = [x for x in out if x["ts"] >= since]
+    return out
+
+
 # --------------------------------------------------------------------------- #
-# Broker side (list orders only)                                              #
+# Broker side (list orders and activities only)                               #
 # --------------------------------------------------------------------------- #
 
 def build_trading_client():
@@ -222,6 +317,48 @@ def list_broker_orders(client, since=None):
     out = list(seen.values())
     if since is not None:
         out = [o for o in out if o.submitted_at >= since]
+    return out
+
+
+def _activity(raw):
+    """A kept activity as a dict: id, type, symbol, date, qty, price."""
+    try:
+        a = {"id": raw["id"], "type": ActivityType(raw["activity_type"]).value,
+             "symbol": raw["symbol"], "date": date.fromisoformat(raw["date"]),
+             "qty": raw.get("qty"), "price": raw.get("price")}
+    except (KeyError, TypeError, ValueError):
+        raise ReportError(f"activity malformed: {_fmt(raw.get('id'))}")
+    if not isinstance(a["symbol"], str) or not a["symbol"]:
+        raise ReportError(f"activity malformed: {_fmt(a['id'])}")
+    return a
+
+
+def list_broker_activities(client, since=None):
+    """Every OPASN / OPEXP / OPEXC / OPTRD activity dated on or after
+    `since`, paginated to completion. Returns a list in first-seen order."""
+    from alpaca.common.enums import Sort
+
+    params = {"direction": Sort.ASC.value, "page_size": ACTIVITY_PAGE_SIZE}
+    if since is not None:
+        params["after"] = (since - ACTIVITY_LAG).date().isoformat()
+    seen = {}
+    while True:
+        page = client.get(ACTIVITIES_PATH, dict(params))
+        if not isinstance(page, list):
+            raise ReportError("activities response not a list")
+        if not page:
+            break
+        if not all(isinstance(a, dict) and isinstance(a.get("id"), str) for a in page):
+            raise ReportError("activity without an id")
+        new = [a for a in page if a["id"] not in seen]
+        if not new:
+            raise ReportError("pagination stalled: a page with no new activity")
+        for a in new:
+            seen[a["id"]] = a
+        params["page_token"] = page[-1]["id"]
+    out = [_activity(a) for a in seen.values() if a.get("activity_type") in ACTIVITY_TYPES]
+    if since is not None:
+        out = [a for a in out if a["date"] >= since.date()]
     return out
 
 
@@ -305,6 +442,80 @@ def match(jmap, jnone, border):
     return rows
 
 
+def _underlying(contract):
+    """OCC root of a contract symbol (ROOT YYMMDD C/P 8 digits), else None."""
+    if len(contract) > 15 and contract[-8:].isdigit() and contract[-9] in "CP":
+        return contract[:-15]
+    return None
+
+
+def match_activities(transitions, activities):
+    """ACTIVITY rows: dict(symbol, stage_from, stage_to, trigger, journal_ts,
+    expected, broker_type, broker_date, broker_qty, share_qty, share_price,
+    flags, matched)."""
+    key = lambda a: (a["date"], a["id"])  # noqa: E731
+    events = sorted((a for a in activities if a["type"] != SHARE_TRADE.value), key=key)
+    trades = sorted((a for a in activities if a["type"] == SHARE_TRADE.value), key=key)
+    share, paired_trades = {}, set()  # event id -> its OPTRD
+    for ev in events:
+        if ev["type"] == ActivityType.OPEXP.value:
+            continue
+        for t in trades:
+            if (t["id"] not in paired_trades and t["date"] == ev["date"]
+                    and t["symbol"] == _underlying(ev["symbol"])):
+                share[ev["id"]] = t
+                paired_trades.add(t["id"])
+                break
+
+    def row(symbol, tr=None, a=None):
+        s = share.get(a["id"]) if a else None
+        return {"symbol": symbol,
+                "stage_from": tr and tr["stage_from"], "stage_to": tr and tr["stage_to"],
+                "trigger": tr and tr["trigger"], "journal_ts": tr and tr["ts"].isoformat(),
+                "expected": tr and tr["expected"],
+                "broker_type": a and a["type"], "broker_date": a and a["date"],
+                "broker_qty": a and a["qty"],
+                "share_qty": s and s["qty"], "share_price": s and s["price"],
+                "flags": [], "matched": tr is not None and a is not None}
+
+    rows, used = [], set()
+    for tr in sorted(transitions, key=lambda x: (x["ts"], x["rowid"])):
+        a = None
+        if tr["contract"] is not None:
+            a = next((ev for ev in events if ev["id"] not in used
+                      and ev["symbol"] == tr["contract"]), None)
+        r = row(tr["contract"], tr, a)
+        if a is None:
+            r["flags"].append("TRANSITION_ONLY")
+        else:
+            used.add(a["id"])
+            if a["type"] != tr["expected"]:
+                r["flags"].append("MISMATCH:type")
+        rows.append(r)
+    for ev in events:
+        if ev["id"] not in used:
+            r = row(ev["symbol"], None, ev)
+            r["flags"].append("ACTIVITY_ONLY")
+            rows.append(r)
+    for t in trades:
+        if t["id"] not in paired_trades:
+            r = row(t["symbol"], None, t)
+            r["broker_qty"], r["share_qty"], r["share_price"] = None, t["qty"], t["price"]
+            r["flags"].append("ACTIVITY_ONLY")
+            rows.append(r)
+    return rows
+
+
+def render_activity(r):
+    return (f"ACTIVITY symbol={_fmt(r['symbol'])} from={_fmt(r['stage_from'])} "
+            f"to={_fmt(r['stage_to'])} trigger={_fmt(r['trigger'])} "
+            f"journal_ts={_fmt(r['journal_ts'])} expected={_fmt(r['expected'])} "
+            f"broker_type={_fmt(r['broker_type'])} broker_date={_fmt(r['broker_date'])} "
+            f"broker_qty={_fmt(r['broker_qty'])} share_qty={_fmt(r['share_qty'])} "
+            f"share_price={_fmt(r['share_price'])} "
+            f"flags={','.join(r['flags']) or 'OK'}")
+
+
 def render_row(r):
     text = (f"ORDER coid={_fmt(r['coid'])} symbol={_fmt(r['symbol'])} "
             f"side={_fmt(r['side'])} qty={_fmt(r['qty'])} limit={_fmt(r['limit'])} "
@@ -326,9 +537,12 @@ def build_parser():
     p = argparse.ArgumentParser(
         prog="forgetrader.journal_report",
         description="Journal vs broker order history, matched by "
-                    "client_order_id. Read-only; lists orders, never sends one.")
+                    "client_order_id, and journal transitions out of an OPEN "
+                    "stage vs broker option activities, matched by contract. "
+                    "Read-only; lists orders and activities, never sends one.")
     p.add_argument("--since", type=_parse_since, default=None,
-                   help="YYYY-MM-DD (UTC): only orders at or after this date")
+                   help="YYYY-MM-DD (UTC): only orders, transitions and "
+                        "activities at or after this date")
     p.add_argument("dir", metavar="DIR",
                    help="account directory (state.json, journal.db, .env), "
                         "the checkout this runs from; label = basename")
@@ -349,9 +563,12 @@ def main(argv=None):
                               "this code runs from")
         orders, decisions = _read_journal(d / "journal.db")
         jmap, jnone = journal_orders(orders, decisions, args.since)
+        transitions = journal_transitions(orders, decisions, args.since)
         client = build_trading_client()
         border = list_broker_orders(client, args.since)
+        activities = list_broker_activities(client, args.since)
         rows = match(jmap, jnone, border)
+        arows = match_activities(transitions, activities)
     except ReportError as e:
         print(f"ERROR {label} {_fmt(e)}", file=sys.stderr)
         return 1
@@ -361,9 +578,13 @@ def main(argv=None):
 
     for r in rows:
         print(render_row(r))
+    for r in arows:
+        print(render_activity(r))
     matched = sum(1 for r in rows if r["matched"])
-    discrepancies = sum(1 for r in rows if r["flags"])
+    amatched = sum(1 for r in arows if r["matched"])
+    discrepancies = sum(1 for r in rows + arows if r["flags"])
     print(f"REPORT {label} orders={len(rows)} matched={matched} "
+          f"activities={len(arows)} activities_matched={amatched} "
           f"discrepancies={discrepancies}")
     return 3 if discrepancies else 0
 
