@@ -1,8 +1,10 @@
-# HALT runbook - DRAFT for Architect and Baxman review
+# HALT runbook
 
-Brief halt-runbook, 23 Nov 2026, drafted from main ba8299a (critical path item 10, D19).
-DRAFT: nothing here is a banked decision. Every "Decision (Baxman)" line names a choice this
-doc does not make. Every file:line below is ba8299a; re-read the code if HEAD has moved.
+v1, Architect-reviewed 24 Nov 2026, line refs verified at ad9792163005e85e4d701fd9d033918b70712212
+Brief halt-runbook (23 Nov 2026, from ba8299a) and halt-runbook-v1 (24 Nov 2026); critical
+path item 10, D19, D19a. Every "Decision (Baxman)" line names a choice made at recovery
+time, not in this doc. Every file:line below is ad97921; re-read the code if HEAD has moved.
+Baxman sign-off: ____ (date)
 
 ## How to read this
 
@@ -10,8 +12,9 @@ doc does not make. Every file:line below is ba8299a; re-read the code if HEAD ha
 engine writes to `runs.outcome`. `tests/test_halt_runbook.py` extracts the classes from the
 source (ast, never a typed list) and fails if a class has no section here, has two, or if a
 section names a class the code cannot produce. The token rule is literal, so some headings
-are awkward (`HALT:no`, `HALT:unknown`, two `broker_snapshot` classes); renaming them is a
-code change, not a doc change.
+are awkward (`HALT:no`, `HALT:unknown`, two `broker_snapshot` classes). The literal tokens
+are kept by Architect decision 24 Nov 2026: renaming is a Tier 1 code change and would break
+queries on historical journal rows. Parked.
 
 **Outcome shape.** Every HALT row is `MODE:HALT:CLASS DETAIL`, MODE = `dryrun` or `live`
 (run.py:240, 209, 211). The timers run `--live` (deploy/forgetrader-run.service ExecStart), so
@@ -58,6 +61,19 @@ minute, then restarts the timer:
 A dry-run is a full run that never submits (run.py:403, 482): it reads the broker, writes
 state.json and journals. Expect exit 0 and a `dryrun:noop:...` or legal-transition outcome.
 
+## Severity (D19a, Architect 24 Nov 2026)
+
+**Act before the next US market open** for these three, where the D19 premise ("a HALT
+costs staleness, not loss") does not hold:
+
+- `HALT:broker_snapshot['shares']`: the account is short the wheel ticker's stock.
+- `HALT:CC_OPEN call still open but broker shows shares=N` with N below 100: the short call
+  is not fully covered.
+- `HALT:snapshot tracked contract ... expected -1`: the 1-contract cap is broken at the
+  broker.
+
+**Every other class:** next-morning review per D19.
+
 ## HALT:state_missing
 
 - **Outcome:** `MODE:HALT:state_missing` (run.py:253). No detail.
@@ -82,7 +98,7 @@ state.json and journals. Expect exit 0 and a `dryrun:noop:...` or legal-transiti
   broker truth.
 - **Confirmed by:** Baxman `--dry-run`: exit 0, `dryrun:noop:STAGE ...` for the stage broker
   truth shows. Any HALT means the restored state is wrong: fix the state, never force past it.
-- Seen live: (Baxman fills)
+- Seen live: none as of 24 Nov 2026 (HALT lifetime 0 on A and B)
 
 ## HALT:instance
 
@@ -109,7 +125,7 @@ state.json and journals. Expect exit 0 and a `dryrun:noop:...` or legal-transiti
   unit sets the variable differently. The wheel is untouched; no state edit.
 - **Confirmed by:** Baxman `--dry-run`: exit 0, no `HALT:instance`, and the Telegram summary
   arrives with the account's own prefix (`[forgetrader] ` / `[forgetrader-b] `).
-- Seen live: (Baxman fills)
+- Seen live: none as of 24 Nov 2026 (HALT lifetime 0 on A and B)
 
 ## HALT:clock
 
@@ -132,7 +148,7 @@ state.json and journals. Expect exit 0 and a `dryrun:noop:...` or legal-transiti
   payload). An undocumented clock shape stays a HALT; it is never coerced.
 - **Confirmed by:** next timer run outcome is not `HALT:clock`; Baxman `--dry-run` reads the
   clock the same way and is the immediate check.
-- Seen live: (Baxman fills)
+- Seen live: none as of 24 Nov 2026 (HALT lifetime 0 on A and B)
 
 ## HALT:snapshot
 
@@ -166,7 +182,8 @@ state.json and journals. Expect exit 0 and a `dryrun:noop:...` or legal-transiti
     decide the wheel should be tracking it and edit state to the matching stage
     (INSTRUCTIONS recovery step 5).
   - `tracked contract ... expected -1`: the 1-contract cap is broken at the broker. Stop both
-    timers, Architect informed before any action.
+    timers, Architect informed before any action. Severity: act before the next US market
+    open (see "Severity").
   - `pending stage ... without client_order_id` / `tracked_order_status missing`: the
     state was hand-edited without a coid; set it from broker open orders, or set the stage
     to what the broker shows.
@@ -175,7 +192,7 @@ state.json and journals. Expect exit 0 and a `dryrun:noop:...` or legal-transiti
   - `financials missing ...`: code defect, open a brief.
 - **Confirmed by:** Baxman `--dry-run`: exit 0, `dryrun:noop:STAGE ...` or a legal
   transition, and no new `state_halt_*` dump.
-- Seen live: (Baxman fills)
+- Seen live: none as of 24 Nov 2026 (HALT lifetime 0 on A and B)
 
 ## HALT:watchlist_structure
 
@@ -203,7 +220,7 @@ state.json and journals. Expect exit 0 and a `dryrun:noop:...` or legal-transiti
   never writes watchlist.json.
 - **Confirmed by:** Baxman `--dry-run`: exit 0 with `SCAN propose_csp` / `SCAN all_rejected`
   (FLAT) or `SCAN propose_cc` / `cc_rejected:...` / `cc_all_rejected` (HOLDING) printed.
-- Seen live: (Baxman fills)
+- Seen live: none as of 24 Nov 2026 (HALT lifetime 0 on A and B)
 
 ## HALT:submit
 
@@ -240,7 +257,7 @@ state.json and journals. Expect exit 0 and a `dryrun:noop:...` or legal-transiti
 - **Confirmed by:** the next run's outcome is one of the four above. Baxman `--dry-run` is
   the safe check (it cannot submit). The D19 morning review must still read this row: it
   can self-heal and leave the alert and journal as the only trace.
-- Seen live: (Baxman fills)
+- Seen live: none as of 24 Nov 2026 (HALT lifetime 0 on A and B)
 
 ## HALT:holding_basis_invalid
 
@@ -266,14 +283,14 @@ state.json and journals. Expect exit 0 and a `dryrun:noop:...` or legal-transiti
   already moved, per recovery step 5).
 - **Confirmed by:** Baxman `--dry-run`: exit 0 with `noop:HOLDING stable` or the transition
   into HOLDING that was blocked.
-- Seen live: (Baxman fills)
+- Seen live: none as of 24 Nov 2026 (HALT lifetime 0 on A and B)
 
 ## HALT:no
 
 - **Outcome:** `MODE:HALT:no legal transition from STAGE on trigger 'T'` (fs:194).
 - **Trigger:** `apply_trigger` given a (stage, trigger) pair not in LEGAL_TRANSITIONS
   (fs:57-68, 191-194).
-- **Engine did:** not reachable as a runs.outcome in ba8299a. `reconcile` calls apply_trigger
+- **Engine did:** not reachable as a runs.outcome in ad97921. `reconcile` calls apply_trigger
   only with pairs legal for the stage it has just matched (fs:280, 289, 302, 308, 338, 347,
   360, 366). place_csp / place_cc validate the stage first (submit.py:43, 155) and turn any
   unexpected apply_trigger result into `submit:refused:apply_trigger_unexpected: ...`, exit 0
@@ -286,13 +303,13 @@ state.json and journals. Expect exit 0 and a `dryrun:noop:...` or legal-transiti
 - **Recovery:** if ever seen, a code invariant broke. Decision (Baxman): stop that account's
   timer and open a brief; no state edit until the code path is understood.
 - **Confirmed by:** the fixing brief's suites, then Baxman `--dry-run` exit 0.
-- Seen live: (Baxman fills)
+- Seen live: none as of 24 Nov 2026 (HALT lifetime 0 on A and B)
 
 ## HALT:broker_snapshot
 
 - **Outcome:** `MODE:HALT:broker_snapshot missing required key 'shares'` (fs:250).
 - **Trigger:** the snapshot handed to reconcile has no `shares` key (fs:249).
-- **Engine did:** not reachable from run.py in ba8299a: build_snapshot always returns
+- **Engine did:** not reachable from run.py in ad97921: build_snapshot always returns
   `shares` (fs:718-723) and a SnapshotError stops the run first. If raised: reconcile
   treatment (dump, decision row, common tail, exit 4).
 - **Diagnosis:**
@@ -302,7 +319,7 @@ state.json and journals. Expect exit 0 and a `dryrun:noop:...` or legal-transiti
   - B: `cat "$(ls -1t ~/forgetrader-b/scans/state_halt_*.txt | head -1)"`
 - **Recovery:** if ever seen, a code defect. Decision (Baxman): stop the timer, open a brief.
 - **Confirmed by:** the fixing brief's suites, then Baxman `--dry-run` exit 0.
-- Seen live: (Baxman fills)
+- Seen live: none as of 24 Nov 2026 (HALT lifetime 0 on A and B)
 
 ## HALT:broker_snapshot['shares']
 
@@ -321,11 +338,11 @@ state.json and journals. Expect exit 0 and a `dryrun:noop:...` or legal-transiti
   - A: `jq '.wheel | {stage, ticker, contract_symbol}' ~/forgetrader/state.json`
   - B: `jq '.wheel | {stage, ticker, contract_symbol}' ~/forgetrader-b/state.json`
 - **Recovery:** a short stock position is neither cash-secured nor covered, so the D19
-  premise ("a HALT costs staleness, not loss") does not hold for this class. Decision
-  (Architect): whether this class needs same-day action. Decision (Baxman): close the short
-  at the broker; then edit state to the stage the broker shows.
+  premise ("a HALT costs staleness, not loss") does not hold for this class. Severity: act
+  before the next US market open (see "Severity"). Decision (Baxman): close the short at the
+  broker; then edit state to the stage the broker shows.
 - **Confirmed by:** Baxman `--dry-run`: exit 0 with the expected noop for the stage.
-- Seen live: (Baxman fills)
+- Seen live: none as of 24 Nov 2026 (HALT lifetime 0 on A and B)
 
 ## HALT:FLAT
 
@@ -349,7 +366,7 @@ state.json and journals. Expect exit 0 and a `dryrun:noop:...` or legal-transiti
   broker and reset the wheel to `fresh_flat_state()["wheel"]`.
 - **Confirmed by:** Baxman `--dry-run`: exit 0, `noop:FLAT stable` (and a scan) or the noop
   of the stage now in state.
-- Seen live: (Baxman fills)
+- Seen live: none as of 24 Nov 2026 (HALT lifetime 0 on A and B)
 
 ## HALT:CSP_PENDING
 
@@ -387,7 +404,7 @@ state.json and journals. Expect exit 0 and a `dryrun:noop:...` or legal-transiti
 - **Confirmed by:** Baxman `--dry-run`: exit 0 with `noop:CSP_PENDING awaiting fill`,
   `CSP_PENDING->CSP_OPEN (fill)`, `CSP_PENDING->FLAT (cancel_or_expire)`, or after a reset
   `noop:FLAT stable`.
-- Seen live: (Baxman fills)
+- Seen live: none as of 24 Nov 2026 (HALT lifetime 0 on A and B)
 
 ## HALT:CSP_OPEN
 
@@ -422,7 +439,7 @@ state.json and journals. Expect exit 0 and a `dryrun:noop:...` or legal-transiti
 - **Confirmed by:** Baxman `--dry-run`: exit 0 with `noop:CSP_OPEN stable`,
   `CSP_OPEN->HOLDING (assigned)`, `CSP_OPEN->FLAT (expired_worthless)`, or after an edit the
   noop of the new stage.
-- Seen live: (Baxman fills)
+- Seen live: none as of 24 Nov 2026 (HALT lifetime 0 on A and B)
 
 ## HALT:HOLDING
 
@@ -445,7 +462,7 @@ state.json and journals. Expect exit 0 and a `dryrun:noop:...` or legal-transiti
   Architect decides how the wheel treats the extra / missing shares.
 - **Confirmed by:** Baxman `--dry-run`: exit 0 with `noop:HOLDING stable` (and a CC scan) or
   `noop:FLAT stable` after a reset.
-- Seen live: (Baxman fills)
+- Seen live: none as of 24 Nov 2026 (HALT lifetime 0 on A and B)
 
 ## HALT:CC_PENDING
 
@@ -472,7 +489,7 @@ state.json and journals. Expect exit 0 and a `dryrun:noop:...` or legal-transiti
 - **Confirmed by:** Baxman `--dry-run`: exit 0 with `noop:CC_PENDING awaiting fill`,
   `CC_PENDING->CC_OPEN (fill)`, `CC_PENDING->HOLDING (cancel_or_expire)`, or after a reset
   `noop:HOLDING stable`.
-- Seen live: (Baxman fills)
+- Seen live: none as of 24 Nov 2026 (HALT lifetime 0 on A and B)
 
 ## HALT:CC_OPEN
 
@@ -497,8 +514,8 @@ state.json and journals. Expect exit 0 and a `dryrun:noop:...` or legal-transiti
   - B: `sqlite3 -readonly ~/forgetrader-b/journal.db "SELECT ts, stage_from, stage_to, action FROM decisions ORDER BY rowid DESC LIMIT 10;"`
 - **Recovery** (Decision (Baxman), per detail):
   - `call still open but shares=N` with N below 100: the short call is NOT fully covered,
-    so the D19 premise does not hold. Decision (Architect): same-day action or not.
-    Decision (Baxman): restore cover or buy back the call at the broker.
+    so the D19 premise does not hold. Severity: act before the next US market open (see
+    "Severity"). Decision (Baxman): restore cover or buy back the call at the broker.
   - `before expiry`: the call vanished early with the shares still held (bought back);
     confirm at the broker, then reset to HOLDING.
   - `cannot parse` / `right does not match`: correct wheel.contract_symbol from the broker.
@@ -507,7 +524,7 @@ state.json and journals. Expect exit 0 and a `dryrun:noop:...` or legal-transiti
 - **Confirmed by:** Baxman `--dry-run`: exit 0 with `noop:CC_OPEN stable`,
   `CC_OPEN->FLAT (called_away)`, `CC_OPEN->HOLDING (cc_expired_worthless)`, or after an
   edit the noop of the new stage.
-- Seen live: (Baxman fills)
+- Seen live: none as of 24 Nov 2026 (HALT lifetime 0 on A and B)
 
 ## HALT:unknown
 
@@ -527,7 +544,27 @@ state.json and journals. Expect exit 0 and a `dryrun:noop:...` or legal-transiti
 - **Recovery:** Decision (Baxman): which stage broker truth shows (recovery step 5); edit
   `wheel.stage` (and the keys that stage needs). Find who wrote the bad stage first.
 - **Confirmed by:** Baxman `--dry-run`: exit 0 with `noop:STAGE ...` for that stage.
-- Seen live: (Baxman fills)
+- Seen live: none as of 24 Nov 2026 (HALT lifetime 0 on A and B)
+
+## Uncaught exit 1 (no runs row)
+
+- **Triggers:** the exit-1 cases listed in this doc: corrupt or empty state.json, credentials
+  or client build failure, get_clock exception, broker read failure (run.py:66-68, 84-88,
+  245-246, 329). No `HALT:` token, no `runs` row, no decision row, no state write.
+- **How it is seen:** the CRASH alert (`[forgetrader] CRASH unit=U result=R exit=E`,
+  deploy/crash_alert.py:70, via `OnFailure=`) plus the digest's `runs today` shortfall
+  (report.py:285-286). The D19 HALT query does NOT see it: it reads `runs` rows only.
+- **Diagnosis** (read-only, per account):
+  - A: `journalctl --user -u forgetrader-run.service --since today --no-pager | grep -v "\[rate\]" | tail -60`
+  - B: `journalctl --user -u forgetrader-b-run.service --since today --no-pager | grep -v "\[rate\]" | tail -60`
+  - A: `jq . ~/forgetrader/state.json >/dev/null; echo jq=$?`
+  - B: `jq . ~/forgetrader-b/state.json >/dev/null; echo jq=$?`
+    (non-zero = corrupt or empty state.json).
+- **Recovery:**
+  - corrupt or empty state.json: as HALT:state_missing.
+  - one transient broker or clock error: the next run resolves it.
+  - repeats: stop that account's timer, open a brief.
+- **Confirmed by:** Baxman `--dry-run` exit 0.
 
 ## Refusals and other non-HALT stops
 
@@ -548,8 +585,15 @@ Not HALT classes (no `HALT:` token), listed so the morning review does not mista
   digest counts it: `outcome LIKE '%HALT%'` (report.py:177) is case-insensitive in SQLite.
   Recovery as HALT:submit (probe calls the same place_csp).
 - **Uncaught, exit 1, no runs row:** corrupt or empty state.json, credentials or client
-  build failure, get_clock exception, broker read failure (run.py:66-68, 84-88). Visible
-  only in journalctl and the CRASH alert.
+  build failure, get_clock exception, broker read failure (run.py:66-68, 84-88). See
+  "Uncaught exit 1 (no runs row)".
 - **Standalone CLIs:** `python -m forgetrader.cc_scan` prints `HALT watchlist_structure`
   and exits 4 (cc_scan.py:321-323); wheel_dryrun.py main exits 1 on the same error
   (wheel_dryrun.py:527-529). Neither writes a runs row.
+
+## Drill coverage
+
+- The funding-5 recovery drill on B exercises HALT:state_missing.
+- HALT:submit and the *_PENDING `not_found` / review-status (`order status 'S' requires
+  review`) detail lines are forced by fault injection (funding 4).
+- A class never seen live and never forced is unproven, whatever "Seen live" says.
