@@ -4,7 +4,9 @@ v1, Architect-reviewed 24 Nov 2026, line refs verified at ad9792163005e85e4d701f
 Brief halt-runbook (23 Nov 2026, from ba8299a) and halt-runbook-v1 (24 Nov 2026); critical
 path item 10, D19, D19a. Every "Decision (Baxman)" line names a choice made at recovery
 time, not in this doc. Every file:line below is ad97921; re-read the code if HEAD has moved.
-Baxman sign-off: ____ (date)
+Exception: refs that g2-g3-hardening moved (fs from line 703 on, deploy/b/install_b.py) are
+re-verified on that branch.
+Baxman sign-off: 24 Nov 2026
 
 ## How to read this
 
@@ -51,7 +53,7 @@ the Alpaca paper dashboard); it touches Alpaca and is not reproduced here.
 (`systemctl --user stop forgetrader-run.timer` or `forgetrader-b-run.timer`). State edits
 follow the INSTRUCTIONS "State recovery runbook" step 6 procedure (jq to a temp file in the
 same directory, `chmod --reference`, `mv`). `--set-state` does not exist in the code
-(forgetrader_state.py:841-850 has only `--show` / `--init`). Broker-side actions (cancel an
+(forgetrader_state.py:847-856 has only `--show` / `--init`). Broker-side actions (cancel an
 order, close a position) are Baxman's, made outside the engine.
 
 **Confirmation rule.** Baxman runs a dry-run from the account directory, outside a timer
@@ -119,7 +121,7 @@ costs staleness, not loss") does not hold:
   - B: `jq '{wheel, last_run}' ~/forgetrader-b/state.json`
   - The FORGE_INSTANCE line only, no other .env line printed. A: `grep -n '^FORGE_INSTANCE' ~/forgetrader/.env`
     B: `grep -n '^FORGE_INSTANCE' ~/forgetrader-b/.env` (B must read exactly `FORGE_INSTANCE=b`,
-    deploy/b/install_b.py:26-27, 54).
+    deploy/b/install_b.py:28-29, 57).
 - **Recovery:** Decision (Baxman): which instance this checkout is, then set exactly one
   `FORGE_INSTANCE=a` (A) / `FORGE_INSTANCE=b` (B) line in that account's .env and check no
   unit sets the variable differently. The wheel is untouched; no state edit.
@@ -153,12 +155,13 @@ costs staleness, not loss") does not hold:
 ## HALT:snapshot
 
 - **Outcome:** `MODE:HALT:snapshot MESSAGE` (run.py:337, 342). MESSAGE is one of
-  (fs:659-712): `financials missing positions or open_orders`;
+  (fs:659-718): `financials missing positions or open_orders`;
   `pending stage STAGE without client_order_id`;
   `pending stage STAGE tracked_order_status missing`; `position SYM qty Q is not an int`;
   `tracked contract SYM qty Q, expected -1`; `unexpected position SYM qty Q`;
   `malformed contract symbol 'C'` (optionally `: right 'X'`);
-  `unexpected open order SYM COID STATUS`.
+  `unexpected open order SYM COID STATUS`;
+  `more than one open order with tracked client_order_id COID: N` (fs:715-718).
 - **Trigger:** `fs.build_snapshot(wheel, financials)` raised SnapshotError: the broker shows
   something the wheel does not track. Note `_safe_int` truncates fractional qty
   (fs:421-425), so `is not an int` means an unparseable qty (None).
@@ -181,6 +184,8 @@ costs staleness, not loss") does not hold:
   - `unexpected position` / `unexpected open order`: close or cancel it at the broker, or
     decide the wheel should be tracking it and edit state to the matching stage
     (INSTRUCTIONS recovery step 5).
+  - `more than one open order with tracked client_order_id`: a second order under the
+    tracked id: cancel the duplicate at the broker, then dry-run.
   - `tracked contract ... expected -1`: the 1-contract cap is broken at the broker. Stop both
     timers, Architect informed before any action. Severity: act before the next US market
     open (see "Severity").
@@ -310,7 +315,7 @@ costs staleness, not loss") does not hold:
 - **Outcome:** `MODE:HALT:broker_snapshot missing required key 'shares'` (fs:250).
 - **Trigger:** the snapshot handed to reconcile has no `shares` key (fs:249).
 - **Engine did:** not reachable from run.py in ad97921: build_snapshot always returns
-  `shares` (fs:718-723) and a SnapshotError stops the run first. If raised: reconcile
+  `shares` (fs:724-729) and a SnapshotError stops the run first. If raised: reconcile
   treatment (dump, decision row, common tail, exit 4).
 - **Diagnosis:**
   - A: `sqlite3 -readonly ~/forgetrader/journal.db "SELECT rowid, ts, outcome FROM runs WHERE instr(outcome, 'HALT:broker_snapshot missing') > 0 ORDER BY rowid DESC LIMIT 5;"`
@@ -376,7 +381,7 @@ costs staleness, not loss") does not hold:
   fs:84-90); `unknown pending_order_status 'S'`; `filling but broker shows shares=N`;
   `order S but broker shows shares=N put_open=B`; `unclassifiable order status ...`
   (unreachable: classify_order_status returns only the four classes, fs:94-98).
-- **Trigger:** at CSP_PENDING the tracked coid's status (fs:757-766, `not_found` on a 404)
+- **Trigger:** at CSP_PENDING the tracked coid's status (fs:763-772, `not_found` on a 404)
   does not resolve to a legal move.
 - **Engine did:** reconcile treatment: stage stays CSP_PENDING, dump (snapshot shows
   `pending_order_status`), decision row, common tail. Exit 4.
@@ -554,6 +559,9 @@ costs staleness, not loss") does not hold:
 - **How it is seen:** the CRASH alert (`[forgetrader] CRASH unit=U result=R exit=E`,
   deploy/crash_alert.py:70, via `OnFailure=`) plus the digest's `runs today` shortfall
   (report.py:285-286). The D19 HALT query does NOT see it: it reads `runs` rows only.
+- **Run timeout:** a run killed by `TimeoutStartSec=10min` (deploy/forgetrader-run.service:10;
+  B's run unit inherits it via deploy/b/install_b.py) shows as a CRASH alert with
+  `result=timeout`. Recovery as HALT:submit (the next run resolves from the tracked status).
 - **Diagnosis** (read-only, per account):
   - A: `journalctl --user -u forgetrader-run.service --since today --no-pager | grep -v "\[rate\]" | tail -60`
   - B: `journalctl --user -u forgetrader-b-run.service --since today --no-pager | grep -v "\[rate\]" | tail -60`

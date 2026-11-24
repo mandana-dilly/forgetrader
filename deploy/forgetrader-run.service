@@ -7,3 +7,4 @@ Type=oneshot
 WorkingDirectory=%h/forgetrader
 ExecStart=%h/forgetrader/.venv/bin/python -m forgetrader.run --live
 UMask=0077
+TimeoutStartSec=10min

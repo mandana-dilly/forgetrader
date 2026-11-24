@@ -700,6 +700,7 @@ def build_snapshot(wheel, financials):
             raise SnapshotError(
                 f"malformed contract symbol {contract!r}: right {right!r}")
 
+    n_tracked = 0
     for o in financials["open_orders"]:
         tolerated = (
             stage in (CSP_PENDING, CC_PENDING)
@@ -710,6 +711,11 @@ def build_snapshot(wheel, financials):
             raise SnapshotError(
                 f"unexpected open order {o['symbol']} "
                 f"{o['client_order_id']} {o['status']}")
+        n_tracked += 1
+    if n_tracked > 1:
+        raise SnapshotError(
+            f"more than one open order with tracked client_order_id "
+            f"{tracked_coid}: {n_tracked}")
 
     pending = None
     if stage in (CSP_PENDING, CC_PENDING):

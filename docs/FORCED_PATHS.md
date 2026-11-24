@@ -160,6 +160,10 @@ row stays the trace).
 
 ### G1 - alpaca-py re-POSTs an order on HTTP 504 (wire-level double submit)
 
+Parked 24 Nov 2026 (Architect): Alpaca documents client_order_id as a unique identifier
+and a duplicate is reportedly rejected; G2 HALTs on any duplicate regardless; SDK
+private-attribute patch rejected as fragile.
+
 - Where: alpaca/common/rest.py:127-135 and :201-202 with constants.py:13
   (`DEFAULT_RETRY_EXCEPTION_CODES = [429, 504]`), reached from run.py:296
   (`TradingClient(api_key, api_secret, paper=paper)`, default retry config) and
@@ -183,6 +187,8 @@ row stays the trace).
 
 ### G2 - build_snapshot tolerates any number of open orders under the tracked id
 
+Fixed in g2-g3-hardening. See "G2 / G3 fix (g2-g3-hardening)" below.
+
 - Where: forgetrader_state.py:703-712. Every open order whose client_order_id equals
   the tracked one is tolerated; the count is never checked.
 - Scenario: P4 after G1 (two orders under C). Snapshot passes, reconcile reads the
@@ -196,6 +202,9 @@ row stays the trace).
   the count exceeds 1. No test written here (it would assert the fix).
 
 ### G3 - a stalled submit hangs the run forever: no exception, no HALT
+
+Fixed in g2-g3-hardening, effective once Baxman installs the units. See "G2 / G3 fix
+(g2-g3-hardening)" below.
 
 - Where: alpaca/common/rest.py:113-125 / :195 (no `timeout` passed to requests), and
   deploy/forgetrader-run.service (`Type=oneshot`, no `TimeoutStartSec=`; for oneshot
@@ -218,6 +227,8 @@ row stays the trace).
   the order's life, so this is staleness, not exposure.
 
 ### Doc disagreement (reported, not fixed)
+
+Resolved 24 Nov 2026: brief wording was loose; code and spec agree (last_run only).
 
 The brief asks for "no state write on a broker-mismatch HALT". The code writes state
 on every HALT: `_halt_exit` sets `last_run` and calls `fs.write_state`
@@ -289,3 +300,72 @@ K7b; test_alerts R5).
 
 No mutation in this table is registered as a regression guard: each is predicted to
 bite.
+
+## G2 / G3 fix (g2-g3-hardening)
+
+Base c20f652. Line references below are to this branch.
+
+G2: `build_snapshot` counts the open orders it tolerates under the tracked
+client_order_id (forgetrader_state.py:703-714) and raises
+`SnapshotError("more than one open order with tracked client_order_id COID: N")` when
+N exceeds 1 (:715-718). Exactly one stays tolerated. Every later line of the module
+moves down by 6 (e.g. read_broker_financials's 404 mapping is now :765-772).
+Tests: test_snapshot fixtures 22 (CSP_PENDING) and 23 (CC_PENDING), message pinned
+exactly; test_forced_paths P5 below.
+
+### P5 second open order under the tracked id (both legs)
+
+Forced: run 1 accepted as in P1 (common run 1 above). The fake broker then lists a
+second OPEN order (status `new`) under the same coid C in `get_orders(OPEN)`;
+`get_order_by_client_id(C)` still returns the first. FakeBroker gained an optional
+`dup_orders` list that only P5 sets; P1-P4 never set it, so their behaviour is
+unchanged.
+
+Expected run 2: exit 4, `live:HALT:snapshot more than one open order with tracked
+client_order_id C: 2`, stage P, coid C, decisions `[HALT:snapshot more than one open
+order with tracked client_order_id C: 2]`, no orders rows, no events, submits 1,
+money M1 (no refresh), no scan, state unchanged but `last_run`. Code:
+forgetrader_state.py:715-718, run.py:334-342 -> `_halt_exit` (run.py:205-213). Decision
+D4 (an unexpected open order is a HALT).
+
+G3: `TimeoutStartSec=10min` is the last line of the [Service] section of
+deploy/forgetrader-run.service (line 10). Account B's run unit has no committed file:
+deploy/b/install_b.py renders forgetrader-b-run.service from A's INSTALLED
+forgetrader-run.service, so B inherits the line once A's unit is installed, and
+install_b.py now refuses to render a B run service without the exact line
+(`timeout-missing`, `TIMEOUT_LINE` at install_b.py:56, check at :189-190). Tests:
+test_install_b R6 (fixture equals the committed unit), R7 (the line is in [Service] of
+the committed A unit and of the rendered B unit), R2 / D5 / A5 (literal B text), C12
+(refusal when the A unit lacks the line). Not effective until Baxman installs the A
+unit and re-runs install_b.py --apply.
+
+### Fault injection (pre-registered, g2-g3-hardening)
+
+Script: tests/fi/fi_g2_g3.sh, same convention as fi_forced_paths.sh (temp copy of the
+tracked tree with the .venv linked in, worktree never mutated; per mutation: original
+line checked, `sed -i` ONE line, `mutated_lines` must be 1, ALL suites, failure count per
+suite vs the prediction, `cp` restore, `sha256sum -c`). A traceback is a CRASH.
+
+| ID | Gap / leg | File:line | Mutation | Predicted failing assertions |
+| --- | --- | --- | --- | --- |
+| G2a | G2 both | forgetrader_state.py:715 | `if n_tracked > 1:` -> `if False:` | snapshot 4, forced_paths 14 |
+| G3a | G3 A | deploy/forgetrader-run.service:10 | `TimeoutStartSec=10min` -> `# TimeoutStartSec=10min removed by FI` | install_b 2 |
+| G3b | G3 B | deploy/b/install_b.py:191 | `return b_name, t` -> `return b_name, t.replace(TIMEOUT_LINE + chr(10), "")` | install_b 4 |
+| G3c | G3 B guard | deploy/b/install_b.py:189 | `if b_name == ... and TIMEOUT_LINE not in ...:` -> `if False:` | install_b 7 |
+
+How the counts arise:
+- G2a: test_snapshot fixtures 22 and 23 each fail the "expected SnapshotError" check and
+  the exact-message check (2 x 2 = 4). test_forced_paths P5 run 2 on each leg becomes
+  `noop:P awaiting fill` (rc, runs, last_run, decisions, events, money, unchanged) 7 x 2
+  legs = 14; stage, coid, orders, submits and scan are the same either way.
+- G3a: the comment removes the directive (systemd ignores `#` lines). test_install_b R6
+  (fixture no longer equals the committed run.service) 1, R7 for the committed unit 1.
+  The render tests use the fixture texts, so nothing else moves.
+- G3b: B's rendered run service loses the line after the guard passed. test_install_b
+  R2 for forgetrader-b-run.service 1, R7 for the rendered unit 1, D5 (dry-run prints it
+  in full) 1, A5 (written text) 1 = 4.
+- G3c: the guard never refuses. C12 dry-run: exit 2 and the named reason fail (2), nothing
+  is written either way; C12 --apply: exit 2, named reason, nothing written, runner
+  unused and no B unit all fail (5); 7.
+
+No mutation in this table is registered as a regression guard: each is predicted to bite.

@@ -17,7 +17,9 @@ forgetrader-b path is never touched. Each substitution is counted against the
 count found in recon (SPEC below); any other count, any leftover A path, A unit
 name or A minute in a B unit, or a B timer whose OnCalendar set is not exactly
 the expected one refuses (exit 2, named reason, nothing written). OnFailure=
-stays on A's forgetrader-crash-alert@ template; %n names the B unit.
+stays on A's forgetrader-crash-alert@ template; %n names the B unit. B's run
+service must carry the line TimeoutStartSec=10min (gap G3), taken from A's
+installed run service; without it the render refuses.
 
 Preconditions, each refused (exit 2) before anything is written: A's four source
 units and the crash-alert@ template exist; the B repo is a git checkout whose
@@ -51,6 +53,7 @@ DEFAULT_B_REPO = "/home/forge/forgetrader-b"
 
 CRASH_TEMPLATE = "forgetrader-crash-alert@.service"
 ONFAILURE_LINE = "OnFailure=forgetrader-crash-alert@%n.service"
+TIMEOUT_LINE = "TimeoutStartSec=10min"
 ENV_LINE = b"FORGE_INSTANCE=b"
 
 # An A repo path: %h/forgetrader or /home/forge/forgetrader ending at "/", whitespace or EOL.
@@ -183,6 +186,8 @@ def render(a_name, a_text):
         raise Refused(f"oncalendar-mismatch: {b_name} OnCalendar {oncalendars(t)} is not {cal}")
     if b_name.endswith(".service") and ONFAILURE_LINE not in t.splitlines():
         raise Refused(f"onfailure-missing: {b_name} has no line {ONFAILURE_LINE}")
+    if b_name == "forgetrader-b-run.service" and TIMEOUT_LINE not in t.splitlines():
+        raise Refused(f"timeout-missing: {b_name} has no line {TIMEOUT_LINE}")
     return b_name, t
 
 

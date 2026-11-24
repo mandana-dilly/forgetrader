@@ -42,6 +42,8 @@ def snap(shares, put_open, call_open, status):
             "pending_order_status": status}
 
 
+G2_MSG = f"more than one open order with tracked client_order_id {COID}: 2"
+
 # (name, wheel, financials, expected) -- expected is a dict (snapshot) or a
 # str (SnapshotError message prefix).
 FIXTURES = [
@@ -86,6 +88,14 @@ FIXTURES = [
      "pending stage CC_PENDING tracked_order_status missing"),
     ("21-csp-pending-not-found-ok", wheel(fs.CSP_PENDING, PUT, COID),
      fin(tracked="not_found"), snap(0, False, False, "not_found")),
+    # G2: exactly one open order under the tracked id is tolerated (04); two HALT.
+    ("22-csp-pending-two-tracked-orders", wheel(fs.CSP_PENDING, PUT, COID),
+     fin(orders=[order(COID), order(COID, PUT, "accepted")], tracked="new"),
+     G2_MSG),
+    ("23-cc-pending-two-tracked-orders", wheel(fs.CC_PENDING, CALL, COID),
+     fin([pos("NOK", 100)], orders=[order(COID, CALL), order(COID, CALL)],
+         tracked="new"),
+     G2_MSG),
 ]
 
 def main():
@@ -112,6 +122,10 @@ def main():
             elif not raised.startswith(expected):
                 failures.append(f"{name}: message {raised!r} does not start "
                                 f"with {expected!r}")
+            if expected == G2_MSG:  # G2 message is pinned exactly, not by prefix
+                assertions += 1
+                if raised != expected:
+                    failures.append(f"{name}: message {raised!r} != {expected!r}")
 
     # 16 CHAIN: fixture 8 snapshot -> reconcile at CSP_OPEN
     n_fixtures += 1

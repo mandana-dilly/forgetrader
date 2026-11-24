@@ -9,7 +9,8 @@ forge's home, never systemctl: the runner is a spy.
   P  each precondition refuses (exit 2, named reason, nothing written, runner unused),
      with --apply too; state missing prints the exact --init command.
   C  substitution-count mismatch refuses; a leftover A path, A unit name or A minute
-     refuses; a wrong OnCalendar set refuses.
+     refuses; a wrong OnCalendar set refuses; a run service without
+     TimeoutStartSec=10min refuses (G3).
   A  --apply writes exactly the B units, runs the expected runner calls, never touches
      A's files (hash before/after) and never names an A unit to systemctl.
   E  no .env content in any output.
@@ -50,6 +51,7 @@ Type=oneshot
 WorkingDirectory=%h/forgetrader
 ExecStart=%h/forgetrader/.venv/bin/python -m forgetrader.run --live
 UMask=0077
+TimeoutStartSec=10min
 """,
     "forgetrader-run.timer": """[Unit]
 Description=ForgeTrader live run, US market hours (D27)
@@ -110,6 +112,7 @@ Type=oneshot
 WorkingDirectory=%h/forgetrader-b
 ExecStart=%h/forgetrader-b/.venv/bin/python -m forgetrader.run --live
 UMask=0077
+TimeoutStartSec=10min
 """,
     "forgetrader-b-run.timer": """[Unit]
 Description=ForgeTrader live run, US market hours (D27)
@@ -242,6 +245,13 @@ check(ib.A_PATH_RE.subn(r"\1/forgetrader-b", "x %h/forgetrader-b/a %h/forgetrade
 for a_name, a_text in A_UNITS.items():
     check((ROOT / "deploy" / a_name).read_text() == a_text,
           f"R6 fixture {a_name} equals the committed deploy/ copy (recon counts hold)")
+for unit, text in (("deploy/forgetrader-run.service",
+                    (ROOT / "deploy" / "forgetrader-run.service").read_text()),
+                   ("rendered forgetrader-b-run.service",
+                    render("forgetrader-run.service", A_UNITS["forgetrader-run.service"])[1])):
+    svc = text.split("[Service]\n", 1)[-1] if "[Service]\n" in text else ""
+    check("TimeoutStartSec=10min" in svc.splitlines(),
+          f"R7 {unit} has TimeoutStartSec=10min in [Service] (G3)")
 check(ib.build_parser().parse_args([]).unit_dir == "/home/forge/.config/systemd/user"
       and ib.build_parser().parse_args([]).a_repo == "/home/forge/forgetrader"
       and ib.build_parser().parse_args([]).b_repo == "/home/forge/forgetrader-b"
@@ -395,6 +405,9 @@ refusal("C11 existing forgetrader-b path in an A unit", lambda f: None, "count-m
         units=with_unit("forgetrader-run.service",
                         run_svc.replace("WorkingDirectory=%h/forgetrader",
                                         "WorkingDirectory=%h/forgetrader-b")))
+refusal("C12 TimeoutStartSec dropped from run.service", lambda f: None, "timeout-missing",
+        units=with_unit("forgetrader-run.service",
+                        run_svc.replace("TimeoutStartSec=10min\n", "")))
 
 # --------------------------------------------------------------------------- A
 print("A  --apply")

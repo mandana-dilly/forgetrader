@@ -12,13 +12,15 @@ Forces the four funding-4 broker paths through the REAL engine on BOTH legs
   P4  submit_order raises the exception alpaca-py 0.43.5 raises for a gateway
       timeout (APIError, HTTP 504, after its own retries); variant a: the
       broker never got the order, variant b: it holds it under that id
+  P5  (gap G2) run 1 accepted, then the broker shows a SECOND open order under
+      the tracked client_order_id: the snapshot must HALT, never submit
 
 Real: run.run(live=True) (stage + submit branch), fs.read_broker_financials
 (incl. 404 -> not_found), fs.build_snapshot, fs.reconcile_and_handle,
 submit.place_csp, submit.place_cc, fs.write_state, the journal.
 Faked: the TradingClient class (FakeBroker: one JSON file per scenario holds
-money, positions, orders by client_order_id, every submit_order call and the
-pinned clock, so a child process and the parent share one broker), the two
+money, positions, orders by client_order_id, extra open orders that reuse a
+client_order_id, every submit_order call and the pinned clock, so a child process and the parent share one broker), the two
 data clients (raise on any call), credentials (placeholders), the two scans
 (one passing row, reused from test_run_stages), alerts.send / fs.alert_stub
 (files). Expected outcomes, code references and gaps: docs/FORCED_PATHS.md.
@@ -149,7 +151,11 @@ class FakeBroker:
     def get_orders(self, req):
         if getattr(req.status, "value", req.status) != "open":
             raise AssertionError(f"unexpected get_orders filter {req!r}")
-        return [_order_obj(c, o) for c, o in self._b()["orders"].items()
+        b = self._b()
+        # "dup_orders" (P5 only): further orders under an id already in "orders";
+        # listed here, never returned by get_order_by_client_id.
+        return [_order_obj(c, o) for c, o in
+                list(b["orders"].items()) + [(o["coid"], o) for o in b.get("dup_orders", [])]
                 if o["status"] not in TERMINAL]
 
     def get_order_by_client_id(self, coid):
@@ -298,6 +304,14 @@ def set_order(d, coid, status):
     b = broker_load(d / "broker.json")
     if coid in b["orders"]:
         b["orders"][coid]["status"] = status
+    broker_save(d / "broker.json", b)
+
+
+def add_dup_order(d, coid, symbol, status="new"):
+    """A second broker order under an id the broker already holds (gap G2)."""
+    b = broker_load(d / "broker.json")
+    b.setdefault("dup_orders", []).append(
+        {"coid": coid, "id": str(uuid.uuid4()), "symbol": symbol, "status": status})
     broker_save(d / "broker.json", b)
 
 
@@ -566,6 +580,23 @@ def p4b(t, leg):
         shutil.rmtree(d, ignore_errors=True)
 
 
+def p5(t, leg):
+    L, label = LEGS[leg], f"P5-{leg}"
+    d = new_scenario(leg)
+    try:
+        o1, c = run1_live(t, label, leg, d, "accept")
+        add_dup_order(d, c, L["sym"])
+        set_broker(d, 2)
+        o2 = run_once(d)
+        halt = f"HALT:snapshot more than one open order with tracked client_order_id {c}: 2"
+        expect(t, f"{label} run2", o2, rc=4, outcome=f"live:{halt}", stage=L["pending"],
+               coid=c, decisions=[halt], orders=[], events=[], submits=1,
+               money=money_at(1), scan=False, unchanged_from=o1["state"])
+        scenario_end(t, label, d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def _sha(p):
     p = Path(p)
     return hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else None
@@ -576,7 +607,7 @@ def main():
     before = (_sha(_REAL_STATE), _sha(_REAL_JOURNAL),
               sorted(os.listdir(_REAL_SCANS)) if _REAL_SCANS.exists() else None)
     scenarios = 0
-    for fn in (p1, p2, p3, p4a, p4b):
+    for fn in (p1, p2, p3, p4a, p4b, p5):
         for leg in ("CSP", "CC"):
             scenarios += 1
             try:
@@ -594,7 +625,7 @@ def main():
             print("  " + f)
         print(f"FAIL: {len(t.failures)} failed of {t.n} assertions")
         return 1
-    print(f"PASS: test_forced_paths {scenarios} scenarios (P1 P2 P3 P4a P4b x CSP CC), "
+    print(f"PASS: test_forced_paths {scenarios} scenarios (P1 P2 P3 P4a P4b P5 x CSP CC), "
           f"{t.n} assertions")
     return 0
 
