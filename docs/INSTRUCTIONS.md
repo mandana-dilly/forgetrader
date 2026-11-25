@@ -204,13 +204,13 @@ CLAUDE CODE (user forgedev, no keys, no broker) --> branch bundle --> forge diff
 
 ## State recovery runbook (state.json lost, empty or corrupt)
 
-1. Stop scheduled runs (`systemctl --user stop forgetrader-dryrun.timer`, then check `crontab -l`, `systemctl --user --no-pager list-timers`, Hermes jobs).
+1. Stop scheduled runs (`systemctl --user stop forgetrader-run.timer` for A, `systemctl --user stop forgetrader-b-run.timer` for B, then check `crontab -l`, `systemctl --user --no-pager list-timers`, Hermes jobs).
 2. Find what destroyed it BEFORE restoring (`stat` Birth vs Modify: new inode = something renamed over it; same inode = truncated in place by a shell redirect or `open('w')`). A writer still active will destroy the restore.
 3. Prefer restore from backup. Hand-writing state is the last resort.
 4. Read broker truth FIRST, as the head of the recovery chain (no keys printed; NEVER `bash -x`). The no-arg call builds its own client from `load_credentials()` (verified 2 Nov): `.venv/bin/python -c "import forgetrader_state as fs, json; f=fs.read_broker_financials(); print(json.dumps({k:f[k] for k in ('positions','open_orders')}, indent=2, default=str))"`
 5. Map to stage: nothing -> FLAT; open put order -> CSP\_PENDING (`client_order_id` from `open_orders`, `contract_symbol` = order symbol); short put, no shares -> CSP\_OPEN; 100 shares, no call -> HOLDING; 100 shares + open call order -> CC\_PENDING; 100 shares + short call -> CC\_OPEN; anything else -> stop and investigate.
 6. Move any empty or corrupt `state.json` to `/tmp` as evidence (`--init` refuses while it exists). `--init`, then for a non-FLAT stage edit wheel keys with `jq` to a temp file IN THE SAME DIRECTORY, `chmod --reference`, and `mv` over. Recon `fresh_flat_state` first for the current key set. Do NOT use `--set-state` (cannot set the id; result HALTs).
-7. `--dry-run`: expect exit 0 and `noop:<STAGE>`. A HALT means the hand-written state is wrong. Fix the state; never force past it. Then `systemctl --user start forgetrader-dryrun.timer`.
+7. `--dry-run`: expect exit 0 and `noop:<STAGE>`. A HALT means the hand-written state is wrong. Fix the state; never force past it. Then `systemctl --user start forgetrader-run.timer` (A) or `systemctl --user start forgetrader-b-run.timer` (B).
 
 ## Agent layer (parallel track)
 
