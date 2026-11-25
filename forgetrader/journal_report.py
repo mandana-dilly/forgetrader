@@ -84,6 +84,10 @@ share qty, share price, flags. Flags:
   ACTIVITY_ONLY      an OPASN / OPEXP / OPEXC with no transition, or an OPTRD
                      with no OPASN / OPEXC to pair with
   MISMATCH:type      paired, but the broker type is not the expected one
+  ASSIGN_QTY_MISMATCH  an OPASN whose paired OPTRD share_qty is not 100 x the
+                     assigned contracts with the assignment's sign: put
+                     +100 x contracts (shares bought), call -100 x contracts
+                     (shares called away); contracts = |OPASN qty|
 
 Last line: REPORT <label> orders=N matched=M activities=A
            activities_matched=P discrepancies=K
@@ -449,6 +453,20 @@ def _underlying(contract):
     return None
 
 
+def assign_qty_ok(ev, t):
+    """True iff OPTRD t, paired with OPASN ev, carries 100 shares per assigned
+    contract with the assignment's sign: put +100 x contracts, call -100 x
+    contracts. An unparseable contract or qty is never ok."""
+    contracts, shares = _dec(ev["qty"]), _dec(t["qty"])
+    if _underlying(ev["symbol"]) is None or contracts is None or shares is None:
+        return False
+    if (shares > 0) != (ev["symbol"][-9] == "P"):
+        return False
+    if abs(shares) != 100 * abs(contracts):
+        return False
+    return True
+
+
 def match_activities(transitions, activities):
     """ACTIVITY rows: dict(symbol, stage_from, stage_to, trigger, journal_ts,
     expected, broker_type, broker_date, broker_qty, share_qty, share_price,
@@ -476,7 +494,10 @@ def match_activities(transitions, activities):
                 "broker_type": a and a["type"], "broker_date": a and a["date"],
                 "broker_qty": a and a["qty"],
                 "share_qty": s and s["qty"], "share_price": s and s["price"],
-                "flags": [], "matched": tr is not None and a is not None}
+                "flags": ["ASSIGN_QTY_MISMATCH"] if (
+                    s and a["type"] == ActivityType.OPASN.value
+                    and not assign_qty_ok(a, s)) else [],
+                "matched": tr is not None and a is not None}
 
     rows, used = [], set()
     for tr in sorted(transitions, key=lambda x: (x["ts"], x["rowid"])):

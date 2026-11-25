@@ -25,11 +25,13 @@ docs/prereg/B_CYCLE_2026-12-01.md). The call leg is B's real contract.
      (cc_expired_worthless, expiry guard passes); the 13:15 ET run after.
      Report: discrepancies=0, exact ACTIVITY OPEXP line.
   C  negative controls on the CALLED_AWAY journal, each discrepancies >= 1
-     with its own flag: C1 activity missing (TRANSITION_ONLY), C3 extra broker
-     order (BROKER_ONLY), C4 journal transition with no broker event
-     (TRANSITION_ONLY, contract "-"). C2 (share_qty wrong sign) is NOT here:
-     journal_report does not check the OPTRD sign, so it reports
-     discrepancies=0 - a finding (docs/findings/FINDINGS_2026-11-25.md).
+     with its own flag: C1 activity missing (TRANSITION_ONLY), C2 share_qty
+     wrong sign (ASSIGN_QTY_MISMATCH: call OPTRD +100, put OPTRD -100), C3
+     extra broker order (BROKER_ONLY), C4 journal transition with no broker
+     event (TRANSITION_ONLY, contract "-"), C5 share_qty wrong size
+     (ASSIGN_QTY_MISMATCH: put OPTRD +200, call OPTRD -200). C2 / C5 are
+     findings F1 (docs/findings/FINDINGS_2026-11-25.md); each case flags only
+     the line whose OPTRD is wrong.
   S  --since trap: --since after the OPASN date drops the activity and the
      1 Dec transition reports TRANSITION_ONLY.
 """
@@ -510,6 +512,29 @@ def c1_activity_missing():
                       "activities_matched=1 discrepancies=1", f"C1 last {last(out)!r}")
 
 
+def _assign_qty_case(tag, put_qty, call_qty):
+    """CALLED_AWAY report with the put / call OPTRD qty replaced; exactly the
+    line whose qty is not put +100 / call -100 is ASSIGN_QTY_MISMATCH."""
+    d, bo = _called()
+    acts = [opasn(PUT_B, date(2026, 11, 23)), optrd("BAC", date(2026, 11, 23), put_qty, "48.00"),
+            opasn(CALL_B, date(2026, 11, 27)), optrd("BAC", date(2026, 11, 27), call_qty, "49.00")]
+    want = [ACT_PUT.replace("share_qty=100 ", f"share_qty={put_qty} "),
+            ACT_CALLED.replace("share_qty=-100 ", f"share_qty={call_qty} ")]
+    want = [w if q == ok else w.replace("flags=OK", "flags=ASSIGN_QTY_MISMATCH")
+            for w, q, ok in zip(want, (put_qty, call_qty), ("100", "-100"))]
+    rc, out, err = report(d, bo, acts)
+    t.ok(rc == 3, f"{tag} exit {rc} err={err!r}")
+    t.ok(lines(out, "ACTIVITY ") == want, f"{tag} ACTIVITY lines {lines(out, 'ACTIVITY ')!r}")
+    t.ok(last(out) == f"REPORT {LABEL} orders=2 matched=2 activities=2 "
+                      "activities_matched=2 discrepancies=1", f"{tag} last {last(out)!r}")
+
+
+@scenario
+def c2_share_qty_wrong_sign():
+    _assign_qty_case("C2 call +100", "100", "100")
+    _assign_qty_case("C2 put -100", "-100", "-100")
+
+
 @scenario
 def c3_extra_broker_order():
     d, bo = _called()
@@ -543,6 +568,12 @@ def c4_transition_without_event():
     t.ok(last(out) == f"REPORT {LABEL} orders=2 matched=2 activities=3 "
                       "activities_matched=2 discrepancies=1", f"C4 last {last(out)!r}")
     shutil.rmtree(d.parent, ignore_errors=True)
+
+
+@scenario
+def c5_share_qty_wrong_size():
+    _assign_qty_case("C5 put +200", "200", "-100")
+    _assign_qty_case("C5 call -200", "100", "-200")
 
 
 @scenario
