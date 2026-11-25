@@ -236,7 +236,7 @@ def drill(stage):
         res, out, err, calls, rows = init(d)
         t.ok(res == 0, f"{tag} init exit {res!r} err={err!r}")
         t.ok(out == "broker facts read OK (equity/cash/options_bp/positions populated)\n"
-                    f"wrote fresh FLAT state -> {state_p}\n", f"{tag} init stdout {out!r}")
+                    f"wrote fresh FLAT state at {state_p}\n", f"{tag} init stdout {out!r}")
         t.ok(rows["runs"] == ["init"] and rows["decisions"] == ["init"], f"{tag} init rows {rows!r}")
         t.ok(calls == ["get_account"], f"{tag} init broker calls {calls!r}")
         st = json.loads(state_p.read_text())

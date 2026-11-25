@@ -840,7 +840,7 @@ def cmd_init(_args):
     record_decision(conn, run_id, None, FLAT, "init", detail="fresh FLAT state written")
     conn.close()
 
-    print(f"wrote fresh FLAT state -> {STATE_PATH}")
+    print(f"wrote fresh FLAT state at {STATE_PATH}")
     return 0
 
 

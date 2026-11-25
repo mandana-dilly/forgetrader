@@ -8,6 +8,9 @@
   I  --init refusal (D7 exit 3): an existing state, valid or empty, is
      refused, unchanged, with no broker read and no journal write. A missing
      state is written FLAT with client_order_id None (positive control).
+     Its stdout is exactly "wrote fresh FLAT state at <path>" and nothing it
+     prints carries ">" (so no "->" either): a pasted line must never parse
+     as a redirect onto the state path (2 Nov, findings F7).
 
 STATE_PATH is resolved from __file__ (SCRIPT_DIR), not the cwd, so each
 scenario copies the CURRENT forgetrader_state.py into its own mkdtemp dir
@@ -131,6 +134,10 @@ def part_i():
           "I3 written client_order_id is not None")
     check(STUB_MARK in p.stderr, "I3 broker read did not hit the credentials stub")
     check((d / "journal.db").exists(), "I3 journal.db not written")
+    want = f"wrote fresh FLAT state at {(d / 'state.json').resolve()}\n"
+    check(p.stdout == want, f"I3 stdout {p.stdout!r} want {want!r}")
+    check(">" not in p.stdout + p.stderr,
+          f"I3 output carries a redirect token: {p.stdout + p.stderr!r}")
     shutil.rmtree(d)
 
 

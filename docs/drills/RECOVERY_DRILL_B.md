@@ -20,8 +20,9 @@ stages and the rollback, by `tests/test_recovery_drill.py` (fake broker, tempdir
   Output goes to chat only, never back into the shell (docs/INSTRUCTIONS.md:92). Overwrites
   use `>|` (noclobber). Each block checks before it writes and chains the write with `&&`.
 - **Do not paste step 5b's output back into a shell**: `--init` prints
-  `wrote fresh FLAT state -> /home/forge/forgetrader-b/state.json` (forgetrader_state.py:843),
-  the 2 Nov redirect shape (docs/INSTRUCTIONS.md:304; findings F7).
+  `wrote fresh FLAT state at /home/forge/forgetrader-b/state.json` (forgetrader_state.py:843).
+  It printed the 2 Nov redirect shape until brief report-fixes (docs/INSTRUCTIONS.md:304;
+  findings F7); the output-to-chat rule still holds.
 - Any output that differs from "Expect" is a deviation: stop and run the **Rollback** block.
 
 ## Step 0: preconditions (read-only)
@@ -122,7 +123,7 @@ Expect, exactly (forgetrader_state.py:815-844):
 
 ```text
 broker facts read OK (equity/cash/options_bp/positions populated)
-wrote fresh FLAT state -> /home/forge/forgetrader-b/state.json
+wrote fresh FLAT state at /home/forge/forgetrader-b/state.json
 exit=0
 ```
 
