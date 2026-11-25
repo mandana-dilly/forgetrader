@@ -28,7 +28,7 @@ forgetrader_state.py.
 
 | Token | Emitter file:line | Trigger condition | D19a severity | Runbook section | Run-path test | Unit test |
 | --- | --- | --- | --- | --- | --- | --- |
-| `HALT:state_missing` | run.py:251-256 (runs row run.py:253), exit run.py:257 | `fs.load_state` raises FileNotFoundError (run.py:247-249) | next-morning | HALT_RUNBOOK.md:77 | tests/test_run_stages.py::main S6, S6L (dry / live) | - |
+| `HALT:state_missing` | run.py:251-256 (runs row run.py:253), exit run.py:257 | `fs.load_state` raises FileNotFoundError (run.py:247-249) | next-morning | HALT_RUNBOOK.md:77 | tests/test_run_stages.py::main S6, S6L (dry / live); tests/test_recovery_drill.py (drill step 4) | - |
 | `HALT:instance` | run.py:225-232, exit run.py:265 | `forge_instance.current()` raises InstanceError (forge_instance.py:52-62) | next-morning | HALT_RUNBOOK.md:103 | tests/test_instance.py::part_r (R1, R2) | tests/test_instance.py::part_e |
 | `HALT:clock` | run.py:316-320 | clock None, timestamp None or tz-naive (run.py:311-314) | next-morning | HALT_RUNBOOK.md:130 | tests/test_run_stages.py::main S8 | - |
 | `HALT:snapshot` | run.py:337-342; messages fs:660, 668, 670, 678, 683-684, 687, 693, 700-701, 710-712 | `fs.build_snapshot` raises SnapshotError | **act before open** for `tracked contract ... expected -1` (fs:683-684); else next-morning | HALT_RUNBOOK.md:153 | tests/test_run_stages.py::main S3 (unexpected position); tests/test_halt_coverage.py HC8 (qty -2) | tests/test_snapshot.py |
