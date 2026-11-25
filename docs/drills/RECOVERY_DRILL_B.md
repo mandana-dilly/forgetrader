@@ -2,7 +2,7 @@
 
 Brief wheel-prep-1125 T4 (milestone 14). Funding criterion 5: "One recovery drill: delete
 state, run the runbook, `--dry-run` returns `noop:<STAGE>`" (docs/INSTRUCTIONS.md:275). Every
-file:line is at base c20f6522225ee39308ffbd587560baec44be7012. Simulated end to end, both
+file:line is at base 4b04c86169e59efe29e1bb4a6bcca8a856c34617 (written at c20f652, re-verified). Simulated end to end, both
 stages and the rollback, by `tests/test_recovery_drill.py` (fake broker, tempdir).
 
 ## Rules for this drill
@@ -13,14 +13,14 @@ stages and the rollback, by `tests/test_recovery_drill.py` (fake broker, tempdir
   `cd ~/forgetrader-b`. Never run them from `~/forgetrader` (A's keys).
 - **When:** AFTER the 1 Dec cycle has resolved (docs/prereg/B_CYCLE_2026-12-01.md) and B's
   wheel is FLAT or HOLDING. Never inside B's 10:45 or 13:15 ET timer windows
-  (deploy/b/install_b.py:67-70), and not 16:30-16:40 ET (B digest at 16:35,
-  deploy/b/install_b.py:71-74, reads state.json). A weekday after 14:00 ET or any weekend
+  (deploy/b/install_b.py:70-73), and not 16:30-16:40 ET (B digest at 16:35,
+  deploy/b/install_b.py:74-77, reads state.json). A weekday after 14:00 ET or any weekend
   time is clear.
 - One block per paste. Bracketed paste is on: read the block at the prompt, then Enter.
   Output goes to chat only, never back into the shell (docs/INSTRUCTIONS.md:92). Overwrites
   use `>|` (noclobber). Each block checks before it writes and chains the write with `&&`.
 - **Do not paste step 5b's output back into a shell**: `--init` prints
-  `wrote fresh FLAT state -> /home/forge/forgetrader-b/state.json` (forgetrader_state.py:837),
+  `wrote fresh FLAT state -> /home/forge/forgetrader-b/state.json` (forgetrader_state.py:843),
   the 2 Nov redirect shape (docs/INSTRUCTIONS.md:304; findings F7).
 - Any output that differs from "Expect" is a deviation: stop and run the **Rollback** block.
 
@@ -44,7 +44,7 @@ Expect: `inactive` twice (timer stopped, no run in progress); list-timers shows 
 `forgetrader-b-run.timer` row (without `--all` it lists active timers only: systemd
 behaviour, UNVERIFIED on this host). INSTRUCTIONS step 1 names
 `forgetrader-dryrun.timer` (docs/INSTRUCTIONS.md:207); B's unit is `forgetrader-b-run.timer`
-(deploy/b/install_b.py:10, docs/HALT_RUNBOOK.md:40-42) (findings F8).
+(deploy/b/install_b.py:10, docs/HALT_RUNBOOK.md:42-44) (findings F8).
 
 ## Step 2: timestamped copies of state.json and journal.db
 
@@ -105,7 +105,7 @@ rollback, and the reference the rebuild is checked against.
 cd ~/forgetrader-b && .venv/bin/python -c "import forgetrader_state as fs, json; f=fs.read_broker_financials(); print(json.dumps({k:f[k] for k in ('positions','open_orders')}, indent=2, default=str))"; cat "$(ls -1d ~/drill-b-* | tail -1)"/STAGE
 ```
 
-Expect (keys from forgetrader_state.py:773-792): `"open_orders": []` in both cases, and
+Expect (keys from forgetrader_state.py:779-798): `"open_orders": []` in both cases, and
 - FLAT: `"positions": []`
 - HOLDING: `"positions"` one entry with `"symbol": "BAC"`, `"qty": 100`.
 
@@ -118,7 +118,7 @@ HOLDING. The mapped stage must equal the STAGE file printed last. Anything else:
 cd ~/forgetrader-b && .venv/bin/python forgetrader_state.py --init; echo exit=$?
 ```
 
-Expect, exactly (forgetrader_state.py:809-838):
+Expect, exactly (forgetrader_state.py:815-844):
 
 ```text
 broker facts read OK (equity/cash/options_bp/positions populated)
@@ -126,11 +126,11 @@ wrote fresh FLAT state -> /home/forge/forgetrader-b/state.json
 exit=0
 ```
 
-`REFUSE: ... exists` with exit 3 means state.json is back (forgetrader_state.py:810-813):
-stop. `WARN: broker read failed` (forgetrader_state.py:818-820) means a FLAT state with null
+`REFUSE: ... exists` with exit 3 means state.json is back (forgetrader_state.py:816-819):
+stop. `WARN: broker read failed` (forgetrader_state.py:824-826) means a FLAT state with null
 money was written: Rollback. `--init` journals one runs row `init` and one decision `init`
-(forgetrader_state.py:831-835). The state is FLAT with the broker's money and positions
-(forgetrader_state.py:822-829); for FLAT, the rebuild is done: go to step 6.
+(forgetrader_state.py:837-841). The state is FLAT with the broker's money and positions
+(forgetrader_state.py:828-835); for FLAT, the rebuild is done: go to step 6.
 
 ### 5c: HOLDING only, set the wheel (runbook step 6, jq to a temp file in the same dir)
 
@@ -182,7 +182,7 @@ systemctl --user start forgetrader-b-run.timer && systemctl --user is-active for
 ```
 
 Expect: `active` and the next run at B's next weekday 10:45 or 13:15 ET
-(deploy/b/install_b.py:67-70).
+(deploy/b/install_b.py:70-73).
 
 ## Rollback (any deviation, at any step)
 

@@ -1,7 +1,7 @@
 # ITM covered calls under D28 S1
 
 Brief wheel-prep-1125 T3 (open decision, due before A's 11 Dec expiry). Analysis only: no
-policy or code change. Every file:line is at base c20f6522225ee39308ffbd587560baec44be7012.
+policy or code change. Every file:line is at base 4b04c86169e59efe29e1bb4a6bcca8a856c34617 (written at c20f652, re-verified).
 The D28 and D30 decision texts are not in the repo (`git grep -n "D28\|D30" c20f652` finds
 only run.py:32, "D28 S4"); "S1" below means the strike rule as the code implements it.
 
@@ -71,7 +71,7 @@ cushions to 6.55.
 - The one HALT path: the broker shows the shares gone while the short call still shows open
   (assignment posted to the stock before the option) -> `HALT:CC_OPEN call still open but
   broker shows shares=0` (fs:357), a D19a act-before-open class
-  (docs/HALT_RUNBOOK.md:70-71), but here a timing artefact. Unproven on paper:
+  (docs/HALT_RUNBOOK.md:72-73), but here a timing artefact. Unproven on paper:
   "Paper assignment happens only at expiry" (docs/INSTRUCTIONS.md:244), so paper never
   exercises early assignment at all. Real money would.
 - Exposure grows with depth ITM: the 8.00 call at spot 10.50 (time value 0.25 in the fixture)

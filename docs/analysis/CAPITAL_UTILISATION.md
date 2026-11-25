@@ -1,7 +1,7 @@
 # Capital utilisation at $5,000 per name
 
 Brief wheel-prep-1125 T5. Analysis only: no code, policy or watchlist change. Every repo
-file:line is at base c20f6522225ee39308ffbd587560baec44be7012.
+file:line is at base 4b04c86169e59efe29e1bb4a6bcca8a856c34617 (written at c20f652, re-verified).
 
 ## The code's numbers
 
@@ -68,7 +68,7 @@ passed, not what the scan will pick.
 - **Change (Tier 1, large):** the state holds ONE wheel (forgetrader_state.py:454-464) and
   reconcile walks one stage (forgetrader_state.py:247-372); build_snapshot raises on any
   position that is not the wheel's ticker or contract (forgetrader_state.py:686-687) and on
-  any untracked open order (forgetrader_state.py:703-712); the scan only runs at FLAT
+  any untracked open order (forgetrader_state.py:704-713); the scan only runs at FLAT
   (run.py:363); `CSP_QTY = 1` is hardcoded (submit.py:26). N positions means a list of
   wheels in state, per-wheel snapshot / reconcile / journal, collateral reserved across open
   positions in the ceiling (screener.py:139-142 reads cash only), and new HALT classes and
